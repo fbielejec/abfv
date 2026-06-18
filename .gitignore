@@ -1,2 +1,9 @@
 .ipynb_checkpoints/
 out/
+
+# Rust
+/target
+
+# Python
+__pycache__/
+*.pyc
