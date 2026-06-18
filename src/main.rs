@@ -4,7 +4,7 @@
 //! - Argument parsing + input sanitization;
 //! - predict;
 //! - split;
-//! - FreeSASA;  
+//! - FreeSASA;
 //! - ΔSASA/contacts;
 //! - visualize;
 
@@ -205,7 +205,7 @@ fn run(args: Args) -> Result<(), AbfvError> {
     // }
 
     // Pipeline (to implement; see mvp.ipynb for the reference flow):
-    //   1. predict structure  → workers/predict.py → out/complex.pdb (chains H/L)
+    //   1. predict structure   → workers/predict.py → out/complex.pdb (chains H/L)
     //   2. split chains        → heavy.pdb / light.pdb
     //   3. FreeSASA ×3         → per-residue side-chain SASA (complex, heavy, light)
     //   4. ΔSASA + contacts    → metric first/second @ threshold
@@ -218,8 +218,7 @@ fn run(args: Args) -> Result<(), AbfvError> {
 fn main() -> anyhow::Result<()> {
     let args = Args::parse();
     init_tracing(&args.log);
-
-    run(Args::parse())?;
+    run(args)?;
     Ok(())
 }
 
