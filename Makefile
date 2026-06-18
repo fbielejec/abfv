@@ -1,3 +1,6 @@
+# Python env holding ABodyBuilder3 + Jupyter (override: make notebook VENV=/path/to/venv)
+VENV ?= /home/filip/CloudStation/Python/abodybuilder3/.venv
+
 .PHONY: help
 help: # Show help for each of the Makefile recipes
 	@grep -E '^[a-zA-Z0-9 -]+:.*#'  Makefile | sort | while read -r l; do printf "\033[1;32m$$(echo $$l | cut -f 1 -d':')\033[00m:$$(echo $$l | cut -f 2- -d'#')\n"; done
@@ -25,3 +28,7 @@ watch: # Watch for changes and run clippy
 .PHONY: release
 release: # Build release binary
 	cargo build --release
+
+.PHONY: notebook
+notebook: # Launch JupyterLab from the venv and open mvp.ipynb in the browser
+	$(VENV)/bin/jupyter lab mvp.ipynb
