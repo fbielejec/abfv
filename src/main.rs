@@ -250,31 +250,34 @@ fn run(args: Args) -> Result<(), AbfvError> {
         None => FreesasaArgs::default(),
     };
 
-    // 1. predict structure   -> workers/predict.py -> out/complex.pdb (chains H/L)
+    // 1. predict structure -> calls workers/predict.py -> out/complex.pdb (chains H/L)
     let complex_pdb = predict_structure(&predict, &heavy, &light)?;
     info!(path = %complex_pdb.display(), "Predicted Fv structure");
 
-    // 2. split chains        -> heavy.pdb / light.pdb
+    // 2. split chains -> produces heavy.pdb / light.pdb
     info!("Splitting complex into single-chain PDBs");
     let heavy_pdb = split_chain(&complex_pdb, 'H', "heavy.pdb")?;
     // info!(path = %dst.display(), "wrote chain {chain}");
     let light_pdb = split_chain(&complex_pdb, 'L', "light.pdb")?;
     info!(heavy = %heavy_pdb.display(), light = %light_pdb.display(), "Split chains");
 
-    // 3. FreeSASA x3         -> per-residue side-chain SASA (complex, heavy, light)
+    // 3. call FreeSASA on each chain -> produces per-residue side-chain SASA (complex, heavy, light)
     for pdb in [&complex_pdb, &heavy_pdb, &light_pdb] {
         info!(pdb = %pdb.display(), "Running FreeSASA");
         let rsa = run_freesasa(&freesasa, pdb)?;
         info!(path = %rsa.display(), "wrote RSA file");
     }
+
     // 4. ΔSASA + contacts    -> metric first/second @ threshold
+    // TODO https://github.com/douweschulte/pdbtbx and/or polars
+
     // 5. write contacts.csv / contacts.json
     // 6. visualize           -> workers/visualize.py (TODO --no-viz)
 
     Ok(())
 }
 
-fn main() -> anyhow::Result<()> {
+fn main() -> Result<(), AbfvError> {
     let args = Args::parse();
     init_tracing(&args.log);
     run(args)?;
