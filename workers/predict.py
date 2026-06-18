@@ -29,6 +29,12 @@ def main():
         default="./out",
         help="Output directory for generated files (default: ./out).",
     )
+    parser.add_argument(
+        "-f",
+        "--out-file",
+        default="complex.pdb",
+        help="Output PDB file name (default: complex.pdb).",
+    )
 
     args = parser.parse_args()
 
@@ -41,6 +47,7 @@ def main():
     model = module.model.to(device).eval()
     print("ABodyBuilder3 base model loaded")
 
+    # https://github.com/Exscientia/abodybuilder3/blob/main/notebooks/example.ipynb
     ab_input = string_to_input(heavy=args.heavy, light=args.light)
     ab_input_batch = {
         key: (value.unsqueeze(0).to(device) if key not in ["single", "pair"] else value.to(device))
@@ -54,7 +61,7 @@ def main():
     output = add_atom37_to_output(output, ab_input["aatype"].to(device))
     pdb = output_to_pdb(output, ab_input)
 
-    complex_pdb = os.path.join(args.out_dir, "complex.pdb")
+    complex_pdb = os.path.join(args.out_dir, args.out_file)
     with open(complex_pdb, "w") as fh:
         fh.write(pdb)
 

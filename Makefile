@@ -43,3 +43,7 @@ notebook: # Launch JupyterLab from the venv and open mvp.ipynb in the browser
 .PHONY: predict
 predict: # Predict the Fv structure for the hardcoded example chains
 	$(VENV)/bin/python workers/predict.py "$(LIGHT)" "$(HEAVY)" --checkpoint "$(CKPT)"
+
+.PHONY: run
+run: # Run the abfv Rust CLI on the hardcoded example chains
+	cargo run -- --heavy "$(HEAVY)" --light "$(LIGHT)" predict --checkpoint "$(CKPT)"
