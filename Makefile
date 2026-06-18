@@ -1,6 +1,13 @@
 # Python env holding ABodyBuilder3 + Jupyter (override: make notebook VENV=/path/to/venv)
 VENV ?= /home/filip/CloudStation/Python/abodybuilder3/.venv
 
+# ABodyBuilder3 checkpoint (override: make predict CKPT=/path/to/model.ckpt)
+CKPT ?= /home/filip/CloudStation/Python/abodybuilder3/output/plddt-loss/best_second_stage.ckpt
+
+# Hardcoded example Fv chains (verbatim from examples/light.fasta and examples/heavy.fasta)
+LIGHT := DIQMTQSPSSLSASVGDRVTITCSASQDISNYLNWYQQKPGKAPKVLIYFTSSLHSGVPSRFSGSGSGTDFTLTISSLQPEDFATYYCQQYSTVPWTFGQGTKVEIK
+HEAVY := EVQLVESGGGLVQPGGSLRLSCAASGYTFTNYGMNWVRQAPGKGLEWVGWINTYTGEPTYAADFKRRFTFSLDTSKSTAYLQMNSLRAEDTAVYYCAKYPHYYGSSHWYFDVWGQGTLVTVSS
+
 .PHONY: help
 help: # Show help for each of the Makefile recipes
 	@grep -E '^[a-zA-Z0-9 -]+:.*#'  Makefile | sort | while read -r l; do printf "\033[1;32m$$(echo $$l | cut -f 1 -d':')\033[00m:$$(echo $$l | cut -f 2- -d'#')\n"; done
@@ -32,3 +39,7 @@ release: # Build release binary
 .PHONY: notebook
 notebook: # Launch JupyterLab from the venv and open mvp.ipynb in the browser
 	$(VENV)/bin/jupyter lab mvp.ipynb
+
+.PHONY: predict
+predict: # Predict the Fv structure for the hardcoded example chains
+	$(VENV)/bin/python workers/predict.py "$(LIGHT)" "$(HEAVY)" --checkpoint "$(CKPT)"
