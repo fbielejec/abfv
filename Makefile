@@ -46,4 +46,4 @@ predict: # Predict the Fv structure for the hardcoded example chains
 
 .PHONY: run
 run: # Run the abfv Rust CLI on the hardcoded example chains
-	cargo run -- --heavy "$(HEAVY)" --light "$(LIGHT)" predict --checkpoint "$(CKPT)"
+	cargo run -- --heavy "$(HEAVY)" --light "$(LIGHT)" predict --checkpoint "$(CKPT)" freesasa --binary "/home/filip/CloudStation/Python/freesasa/src/freesasa"

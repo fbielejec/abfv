@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use tracing::{error, info};
 use tracing_subscriber::{EnvFilter, prelude::*};
@@ -12,23 +12,21 @@ const DEFAULT_CHECKPOINT: &str =
     "/home/filip/CloudStation/Python/abodybuilder3/output/plddt-loss/best_second_stage.ckpt";
 const DEFAULT_OUT_DIR: &str = "out";
 const DEFAULT_OUT_FILE: &str = "complex.pdb";
+const DEFAULT_FREESASA: &str = "/home/filip/CloudStation/Python/freesasa/src/freesasa";
+const DEFAULT_FORMAT: &str = "rsa";
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
 enum Metric {
-    /// Relative drop in side-chain SASA: (iso − cplx) / iso ≥ threshold%.
+    /// Relative drop in side-chain SASA: (iso − cplx) / iso >= threshold.
     First,
-    /// Drop in RSA percentage points: rel_iso − rel_cplx ≥ threshold.
+    /// Drop in RSA percentage points: rel_iso − rel_cplx >= threshold.
     Second,
     /// Report and flag under both.
     Both,
 }
 
 #[derive(Parser, Debug)]
-#[command(
-    name = "abfv",
-    version,
-    about = "Antibody Fv VH–VL interface detection (wraps ABodyBuilder3 + FreeSASA)"
-)]
+#[command(name = "abfv")]
 struct Args {
     /// Heavy-chain (VH) amino-acid sequence.
     #[arg(long, value_name = "SEQ", required_unless_present = "heavy_file")]
@@ -54,33 +52,25 @@ struct Args {
     #[arg(long, default_value_t = 10.0)]
     threshold: f64,
 
-    /// Allow `X` (unknown) residues. Off by default: `X` → a structural gap in the model.
+    /// Allow `X` (unknown) residues. Off by default.
     #[arg(long)]
     allow_unknown: bool,
 
-    /// Predictor backend + its options (defaults to `predict` with ABodyBuilder3).
+    /// `predict` step + its options (omit to use defaults). Chains into `freesasa`.
     #[command(subcommand)]
-    predictor: Option<Predictor>,
-
-    // /// Keep intermediate single-chain PDBs.
-    // #[arg(long)]
-    // keep_intermediate: bool,
+    predict: Option<PredictCmd>,
 
     // /// Skip the visualization step.
     // #[arg(long)]
     // no_viz: bool,
-
-    // /// Verbose logging to stderr.
-    // #[arg(short, long)]
-    // verbose: bool,
     /// Tracing filter that honors standard RUST_LOG, with sensible defaults
     #[arg(long, env = "RUST_LOG", default_value = "info,api=debug,common=debug")]
     log: String,
 }
 
-/// Structure-prediction backend (each variant is one predictor + its options).
+/// `predict` subcommand keyword (chains into `freesasa`).
 #[derive(Subcommand, Debug)]
-enum Predictor {
+enum PredictCmd {
     /// Fold the Fv with the ABodyBuilder3 worker script.
     Predict(PredictArgs),
 }
@@ -107,6 +97,17 @@ struct PredictArgs {
     /// Output PDB file name (written under `--out-dir`).
     #[arg(long, value_name = "FILE", default_value = DEFAULT_OUT_FILE)]
     out_file: String,
+
+    /// `freesasa` step + its options (omit to use defaults).
+    #[command(subcommand)]
+    freesasa: Option<FreesasaCmd>,
+}
+
+/// `freesasa` subcommand keyword (nested under `predict`).
+#[derive(Subcommand, Debug)]
+enum FreesasaCmd {
+    /// Run FreeSASA on the predicted PDBs.
+    Freesasa(FreesasaArgs),
 }
 
 impl Default for PredictArgs {
@@ -117,12 +118,33 @@ impl Default for PredictArgs {
             checkpoint: DEFAULT_CHECKPOINT.into(),
             out_dir: DEFAULT_OUT_DIR.into(),
             out_file: DEFAULT_OUT_FILE.into(),
+            freesasa: None,
+        }
+    }
+}
+
+/// Options for the FreeSASA shell-out.
+#[derive(clap::Args, Debug)]
+struct FreesasaArgs {
+    /// FreeSASA binary.
+    #[arg(long, value_name = "PATH", default_value = DEFAULT_FREESASA)]
+    binary: PathBuf,
+
+    /// Output format, passed as `--format=<FORMAT>`.
+    #[arg(long, default_value = DEFAULT_FORMAT)]
+    format: String,
+}
+
+impl Default for FreesasaArgs {
+    fn default() -> Self {
+        Self {
+            binary: DEFAULT_FREESASA.into(),
+            format: DEFAULT_FORMAT.into(),
         }
     }
 }
 
 #[derive(Debug, Error)]
-// #[allow(dead_code)] // TODO
 enum AbfvError {
     #[error("invalid {chain} sequence: {reason}")]
     InvalidSequence { chain: &'static str, reason: String },
@@ -142,28 +164,21 @@ enum AbfvError {
     Parse { what: String, reason: String },
 }
 
-/// The 20 standard amino acids (one-letter codes).
 const STANDARD_AA: &str = "ACDEFGHIKLMNPQRSTVWY";
 
-/// Normalize then validate a raw sequence
 fn clean_and_validate(
     raw: &str,
     chain: &'static str,
     allow_unknown: bool,
 ) -> Result<String, AbfvError> {
-    // normalize
     let mut seq: String = raw
         .lines()
-        // drop FASTA header(s)
         .filter(|l| !l.starts_with('>'))
         .flat_map(|l| l.chars())
-        // drop whitespaces
         .filter(|c| !c.is_whitespace())
         .collect::<String>()
-        // just being nice
         .to_uppercase();
 
-    // drop stop marker
     if seq.ends_with('*') {
         seq.pop();
     }
@@ -225,9 +240,14 @@ fn run(args: Args) -> Result<(), AbfvError> {
 
     info!("Inputs validated");
 
-    let predict = match args.predictor {
-        Some(Predictor::Predict(p)) => p,
+    let mut predict = match args.predict {
+        Some(PredictCmd::Predict(p)) => p,
         None => PredictArgs::default(),
+    };
+
+    let freesasa = match predict.freesasa.take() {
+        Some(FreesasaCmd::Freesasa(f)) => f,
+        None => FreesasaArgs::default(),
     };
 
     // 1. predict structure   -> workers/predict.py -> out/complex.pdb (chains H/L)
@@ -235,16 +255,21 @@ fn run(args: Args) -> Result<(), AbfvError> {
     info!(path = %complex_pdb.display(), "Predicted Fv structure");
 
     // 2. split chains        -> heavy.pdb / light.pdb
-    let (heavy_pdb, light_pdb) = split_chains(complex_pdb.clone())?;
+    info!("Splitting complex into single-chain PDBs");
+    let heavy_pdb = split_chain(&complex_pdb, 'H', "heavy.pdb")?;
+    // info!(path = %dst.display(), "wrote chain {chain}");
+    let light_pdb = split_chain(&complex_pdb, 'L', "light.pdb")?;
     info!(heavy = %heavy_pdb.display(), light = %light_pdb.display(), "Split chains");
 
     // 3. FreeSASA x3         -> per-residue side-chain SASA (complex, heavy, light)
-    run_freesasa(complex_pdb)?;
-    run_freesasa(heavy_pdb)?;
-    run_freesasa(light_pdb)?;
+    for pdb in [&complex_pdb, &heavy_pdb, &light_pdb] {
+        info!(pdb = %pdb.display(), "Running FreeSASA");
+        let rsa = run_freesasa(&freesasa, pdb)?;
+        info!(path = %rsa.display(), "wrote RSA file");
+    }
     // 4. ΔSASA + contacts    -> metric first/second @ threshold
     // 5. write contacts.csv / contacts.json
-    // 6. visualize           -> workers/visualize.py (unless --no-viz)
+    // 6. visualize           -> workers/visualize.py (TODO --no-viz)
 
     Ok(())
 }
@@ -256,40 +281,48 @@ fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn run_freesasa(pdb: PathBuf) -> Result<PathBuf, AbfvError> {
-    todo!()
+fn run_freesasa(fs: &FreesasaArgs, pdb: &Path) -> Result<PathBuf, AbfvError> {
+    let output = Command::new(&fs.binary)
+        .arg(format!("--format={}", fs.format))
+        .arg(pdb)
+        .output()?;
+
+    if !output.status.success() {
+        return Err(AbfvError::Subprocess {
+            tool: fs.binary.display().to_string(),
+            code: output.status.code().unwrap_or(-1),
+            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+        });
+    }
+
+    let rsa_path = pdb.with_extension("rsa");
+    std::fs::write(&rsa_path, &output.stdout)?;
+
+    Ok(rsa_path)
 }
 
-fn split_chains(complex_pdb: PathBuf) -> Result<(PathBuf, PathBuf), AbfvError> {
-    info!("Splitting complex into single-chain PDBs");
+/// Write the records for one `chain` of `complex_pdb` to `name` next to it (the
+/// 'isolated' reference state); returns the written path. Keeps ATOM/HETATM/TER
+/// records whose chain id (column 22, 0-based index 21) matches, then a trailing `END`.
+fn split_chain(complex_pdb: &Path, chain: char, name: &str) -> Result<PathBuf, AbfvError> {
+    let pdb = std::fs::read_to_string(complex_pdb)?;
+    let dst = complex_pdb.with_file_name(name);
 
-    let pdb = std::fs::read_to_string(&complex_pdb)?;
+    let mut out = String::new();
+    for line in pdb.lines() {
+        let kept =
+            (line.starts_with("ATOM") || line.starts_with("HETATM") || line.starts_with("TER"))
+                && line.as_bytes().get(21) == Some(&(chain as u8));
 
-    // Write the records for one chain to `<name>` next to the complex; return its path.
-    let write_chain = |chain: char, name: &str| -> Result<PathBuf, AbfvError> {
-        let dst = complex_pdb.with_file_name(name);
-
-        let mut out = String::new();
-        for line in pdb.lines() {
-            let kept =
-                (line.starts_with("ATOM") || line.starts_with("HETATM") || line.starts_with("TER"))
-                    && line.as_bytes().get(21) == Some(&(chain as u8));
-            if kept {
-                out.push_str(line);
-                out.push('\n');
-            }
+        if kept {
+            out.push_str(line);
+            out.push('\n');
         }
-        out.push_str("END\n");
+    }
+    out.push_str("END\n");
 
-        std::fs::write(&dst, out)?;
-        info!(path = %dst.display(), "wrote chain {chain}");
-        Ok(dst)
-    };
-
-    let heavy_pdb = write_chain('H', "heavy.pdb")?;
-    let light_pdb = write_chain('L', "light.pdb")?;
-
-    Ok((heavy_pdb, light_pdb))
+    std::fs::write(&dst, out)?;
+    Ok(dst)
 }
 
 fn predict_structure(
