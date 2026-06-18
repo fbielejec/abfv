@@ -1,13 +1,3 @@
-//! abfv - antibody Fv VH-VL interface detection.
-//!
-//! Steps:
-//! - Argument parsing + input sanitization;
-//! - predict;
-//! - split;
-//! - FreeSASA;
-//! - ΔSASA/contacts;
-//! - visualize;
-
 use std::path::PathBuf;
 use std::process::Command;
 use tracing::{error, info};
@@ -16,7 +6,13 @@ use tracing_subscriber::{EnvFilter, prelude::*};
 use clap::{Parser, Subcommand, ValueEnum};
 use thiserror::Error;
 
-/// Interpretation of the README's "side-chain accessibility changes by ≥10%".
+const DEFAULT_PYTHON: &str = "/home/filip/CloudStation/Python/abodybuilder3/.venv/bin/python";
+const DEFAULT_SCRIPT: &str = "workers/predict.py";
+const DEFAULT_CHECKPOINT: &str =
+    "/home/filip/CloudStation/Python/abodybuilder3/output/plddt-loss/best_second_stage.ckpt";
+const DEFAULT_OUT_DIR: &str = "out";
+const DEFAULT_OUT_FILE: &str = "complex.pdb";
+
 #[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
 enum Metric {
     /// Relative drop in side-chain SASA: (iso − cplx) / iso ≥ threshold%.
@@ -82,14 +78,6 @@ struct Args {
     log: String,
 }
 
-// Defaults for the ABodyBuilder3 predictor (shared by clap and `PredictArgs::default`).
-const DEFAULT_PYTHON: &str = "/home/filip/CloudStation/Python/abodybuilder3/.venv/bin/python";
-const DEFAULT_SCRIPT: &str = "workers/predict.py";
-const DEFAULT_CHECKPOINT: &str =
-    "/home/filip/CloudStation/Python/abodybuilder3/output/plddt-loss/best_second_stage.ckpt";
-const DEFAULT_OUT_DIR: &str = "out";
-const DEFAULT_OUT_FILE: &str = "complex.pdb";
-
 /// Structure-prediction backend (each variant is one predictor + its options).
 #[derive(Subcommand, Debug)]
 enum Predictor {
@@ -150,6 +138,7 @@ enum AbfvError {
     },
 
     #[error("failed to parse {what}: {reason}")]
+    #[allow(dead_code)] // TODO: constructed once FreeSASA/contacts parsing lands
     Parse { what: String, reason: String },
 }
 
@@ -157,12 +146,6 @@ enum AbfvError {
 const STANDARD_AA: &str = "ACDEFGHIKLMNPQRSTVWY";
 
 /// Normalize then validate a raw sequence
-///
-/// *Normalize*: drop FASTA header lines, strip all whitespace, uppercase, drop a trailing
-/// `*` stop marker.
-///
-/// *Validate*: non-empty, alphabet \in 20 AAs (+ `X` only if `allow_unknown`),
-/// reporting the offending character and 1-based position if
 fn clean_and_validate(
     raw: &str,
     chain: &'static str,
@@ -202,10 +185,7 @@ fn clean_and_validate(
 
             return Err(AbfvError::InvalidSequence {
                 chain,
-                reason: format!(
-                    "'X' at position {pos} (unknown residue → structural gap; \
-                     pass --allow-unknown to permit)"
-                ),
+                reason: format!("'X' at position {pos} (pass --allow-unknown to permit)"),
             });
         }
 
@@ -245,32 +225,26 @@ fn run(args: Args) -> Result<(), AbfvError> {
 
     info!("Inputs validated");
 
-    // if args.verbose {
-    //     eprintln!("VH: {} residues", heavy.len());
-    //     eprintln!("VL: {} residues", light.len());
-    //     eprintln!(
-    //         "metric={:?} threshold={} out_dir={}",
-    //         args.metric,
-    //         args.threshold,
-    //         args.out_dir.display()
-    //     );
-    // }
-
-    // Resolve the predictor backend (defaults to ABodyBuilder3 with default options).
     let predict = match args.predictor {
         Some(Predictor::Predict(p)) => p,
         None => PredictArgs::default(),
     };
 
-    // Pipeline (to implement; see mvp.ipynb for the reference flow):
-    //   1. predict structure   → workers/predict.py → out/complex.pdb (chains H/L)
+    // 1. predict structure   -> workers/predict.py -> out/complex.pdb (chains H/L)
     let complex_pdb = predict_structure(&predict, &heavy, &light)?;
     info!(path = %complex_pdb.display(), "Predicted Fv structure");
-    //   2. split chains        → heavy.pdb / light.pdb
-    //   3. FreeSASA ×3         → per-residue side-chain SASA (complex, heavy, light)
-    //   4. ΔSASA + contacts    → metric first/second @ threshold
-    //   5. write contacts.csv / contacts.json
-    //   6. visualize           → workers/visualize.py (unless --no-viz)
+
+    // 2. split chains        -> heavy.pdb / light.pdb
+    let (heavy_pdb, light_pdb) = split_chains(complex_pdb.clone())?;
+    info!(heavy = %heavy_pdb.display(), light = %light_pdb.display(), "Split chains");
+
+    // 3. FreeSASA x3         -> per-residue side-chain SASA (complex, heavy, light)
+    run_freesasa(complex_pdb)?;
+    run_freesasa(heavy_pdb)?;
+    run_freesasa(light_pdb)?;
+    // 4. ΔSASA + contacts    -> metric first/second @ threshold
+    // 5. write contacts.csv / contacts.json
+    // 6. visualize           -> workers/visualize.py (unless --no-viz)
 
     Ok(())
 }
@@ -282,11 +256,42 @@ fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Step 1: run the predictor to fold the Fv and write `<out_dir>/<out_file>`.
-///
-/// Invokes `<python> <script> <light> <heavy> --checkpoint <ckpt> --out-dir <dir>
-/// --out-file <file>` (predict.py takes the chains positionally as `light heavy`).
-/// Stdout/stderr stream live so the (slow) model load and prediction are visible.
+fn run_freesasa(pdb: PathBuf) -> Result<PathBuf, AbfvError> {
+    todo!()
+}
+
+fn split_chains(complex_pdb: PathBuf) -> Result<(PathBuf, PathBuf), AbfvError> {
+    info!("Splitting complex into single-chain PDBs");
+
+    let pdb = std::fs::read_to_string(&complex_pdb)?;
+
+    // Write the records for one chain to `<name>` next to the complex; return its path.
+    let write_chain = |chain: char, name: &str| -> Result<PathBuf, AbfvError> {
+        let dst = complex_pdb.with_file_name(name);
+
+        let mut out = String::new();
+        for line in pdb.lines() {
+            let kept =
+                (line.starts_with("ATOM") || line.starts_with("HETATM") || line.starts_with("TER"))
+                    && line.as_bytes().get(21) == Some(&(chain as u8));
+            if kept {
+                out.push_str(line);
+                out.push('\n');
+            }
+        }
+        out.push_str("END\n");
+
+        std::fs::write(&dst, out)?;
+        info!(path = %dst.display(), "wrote chain {chain}");
+        Ok(dst)
+    };
+
+    let heavy_pdb = write_chain('H', "heavy.pdb")?;
+    let light_pdb = write_chain('L', "light.pdb")?;
+
+    Ok((heavy_pdb, light_pdb))
+}
+
 fn predict_structure(
     predict: &PredictArgs,
     heavy: &str,
