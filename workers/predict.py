@@ -41,11 +41,11 @@ def main():
     os.makedirs(args.out_dir, exist_ok=True)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print("device:", device)
+    # print("device:", device)
 
     module = LitABB3.load_from_checkpoint(args.checkpoint, map_location=device)
     model = module.model.to(device).eval()
-    print("ABodyBuilder3 base model loaded")
+    # print("ABodyBuilder3 base model loaded")
 
     # https://github.com/Exscientia/abodybuilder3/blob/main/notebooks/example.ipynb
     ab_input = string_to_input(heavy=args.heavy, light=args.light)
@@ -53,7 +53,7 @@ def main():
         key: (value.unsqueeze(0).to(device) if key not in ["single", "pair"] else value.to(device))
         for key, value in ab_input.items()
     }
-    print("inputs moved to the device")
+    # print("inputs moved to the device")
 
     with torch.no_grad():
         output = model(ab_input_batch, ab_input_batch["aatype"])
@@ -65,7 +65,7 @@ def main():
     with open(complex_pdb, "w") as fh:
         fh.write(pdb)
 
-    print("Done")
+    # print("Done")
 
 
 if __name__ == "__main__":
