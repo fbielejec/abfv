@@ -6,6 +6,13 @@ import argparse
 # import sys
 # from pathlib import Path
 import os
+
+# CuBLAS needs a fixed workspace size for deterministic matmul on CUDA >= 10.2.
+# Must be set before torch initializes cuBLAS (i.e. before `import torch`),
+# otherwise `torch.use_deterministic_algorithms(True)` only warns and falls back
+# to non-deterministic kernels. `setdefault` lets an outer env override it.
+os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
+
 import random
 import numpy as np
 import torch

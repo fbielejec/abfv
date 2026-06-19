@@ -1,6 +1,9 @@
 .ipynb_checkpoints/
 out/
 
+# Local environment config
+.env
+
 # Rust
 /target
 

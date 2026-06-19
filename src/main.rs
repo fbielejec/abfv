@@ -9,18 +9,18 @@ use std::{
 use clap::{Parser, Subcommand};
 use thiserror::Error;
 use tracing::{error, info};
-use tracing_subscriber::{prelude::*, EnvFilter};
+use tracing_subscriber::{EnvFilter, prelude::*};
 
 const STANDARD_AA: &str = "ACDEFGHIKLMNPQRSTVWY";
 
-const DEFAULT_PYTHON: &str = "/home/filip/CloudStation/Python/abodybuilder3/.venv/bin/python";
+// For host-specific use a local `.env` file (see `.env.example`)
+const DEFAULT_PYTHON: &str = "python3";
 const DEFAULT_SCRIPT: &str = "workers/predict.py";
-const DEFAULT_CHECKPOINT: &str =
-    "/home/filip/CloudStation/Python/abodybuilder3/output/plddt-loss/best_second_stage.ckpt";
+const DEFAULT_CHECKPOINT: &str = "model/best_second_stage.ckpt";
 const DEFAULT_SEED: u64 = 42;
 const DEFAULT_OUT_DIR: &str = "out";
 const DEFAULT_OUT_FILE: &str = "complex.pdb";
-const DEFAULT_FREESASA: &str = "/home/filip/CloudStation/Python/freesasa/src/freesasa";
+const DEFAULT_FREESASA: &str = "vendored/freesasa";
 const DEFAULT_FORMAT: &str = "rsa";
 const DEFAULT_OUT_CSV: &str = "contacts.csv";
 const DEFAULT_VISUALIZE: &str = "workers/visualize.py";
@@ -117,13 +117,6 @@ struct PredictArgs {
 enum FreesasaCmd {
     /// Run FreeSASA on the predicted PDBs.
     Freesasa(FreesasaArgs),
-}
-
-/// Read an env var, falling back to a compile-time default.
-/// Mirrors clap's `env = ...` precedence for the code paths where a subcommand
-/// is omitted and the `Default` impl (rather than the clap parser) supplies values.
-fn env_or(key: &str, default: &str) -> PathBuf {
-    std::env::var(key).unwrap_or_else(|_| default.to_string()).into()
 }
 
 impl Default for PredictArgs {
@@ -294,7 +287,7 @@ fn read_seq(direct: Option<String>, file: Option<PathBuf>) -> Result<String, Abf
 }
 
 fn run(args: Args) -> Result<(), AbfvError> {
-    info!(?args, "Starting");
+    info!("Starting\n{args:#?}");
 
     let heavy = clean_and_validate(
         &read_seq(args.heavy, args.heavy_file)?,
@@ -370,6 +363,7 @@ fn run(args: Args) -> Result<(), AbfvError> {
 }
 
 fn main() -> Result<(), AbfvError> {
+    let _ = dotenvy::dotenv();
     let args = Args::parse();
     init_tracing(&args.log);
     run(args)?;
@@ -609,4 +603,11 @@ fn init_tracing(filter: &str) {
         .with(filter)
         .with(tracing_subscriber::fmt::layer().with_target(true))
         .init();
+}
+
+/// Read an env var, falling back to a compile-time default.
+fn env_or(key: &str, default: &str) -> PathBuf {
+    std::env::var(key)
+        .unwrap_or_else(|_| default.to_string())
+        .into()
 }
