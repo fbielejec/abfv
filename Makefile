@@ -34,6 +34,10 @@ fmt-check: # Check formatting
 test: # Run tests with verbose output
 	cargo test --verbose -- --nocapture
 
+.PHONY: notebook
+notebook: # Launch JupyterLab from the venv and open mvp.ipynb in the browser
+	$(VENV)/bin/jupyter lab mvp.ipynb
+
 .PHONY: watch
 watch: # Watch for changes and run clippy
 	cargo watch -s 'cargo clippy' -c
@@ -41,10 +45,6 @@ watch: # Watch for changes and run clippy
 .PHONY: release
 release: # Build release binary
 	cargo build --release
-
-.PHONY: notebook
-notebook: # Launch JupyterLab from the venv and open mvp.ipynb in the browser
-	$(VENV)/bin/jupyter lab mvp.ipynb
 
 .PHONY: predict
 predict: # Predict the Fv structure for the hardcoded example chains
@@ -63,3 +63,14 @@ freesasa: # Run FreeSASA (rsa) on the three pipeline PDBs
 .PHONY: visualize
 visualize: # Run visualize script
 	$(VENV)/bin/python workers/visualize.py "$(CONTACTS)"
+
+.PHONY: docker-build
+docker-build: # Build the self-contained abfv docker image
+	DOCKER_BUILDKIT=1 docker build -t abfv .
+
+.PHONY: docker-run
+docker-run: # Run the dockerized pipeline (uses bundled example chains)
+	mkdir -p out
+	docker run --rm -v "$(PWD)/out:/work/out" abfv \
+	  --heavy-file /opt/abfv/examples/heavy.fasta \
+	  --light-file /opt/abfv/examples/light.fasta

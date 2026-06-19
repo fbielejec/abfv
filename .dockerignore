@@ -1,0 +1,8 @@
+target/
+out/
+docs/
+mvp.ipynb
+.ipynb_checkpoints/
+.git/
+__pycache__/
+*.pyc

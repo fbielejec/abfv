@@ -1,13 +1,15 @@
-use std::collections::HashMap;
-use std::fmt::Write;
-use std::fs;
-use std::path::{Path, PathBuf};
-use std::process::Command;
-use tracing::{error, info};
-use tracing_subscriber::{EnvFilter, prelude::*};
+use std::{
+    collections::HashMap,
+    fmt::Write,
+    fs,
+    path::{Path, PathBuf},
+    process::Command,
+};
 
 use clap::{Parser, Subcommand};
 use thiserror::Error;
+use tracing::{error, info};
+use tracing_subscriber::{prelude::*, EnvFilter};
 
 const STANDARD_AA: &str = "ACDEFGHIKLMNPQRSTVWY";
 
@@ -28,7 +30,12 @@ const DEFAULT_PLOT_FILE: &str = "dsasa_barplot.png";
 #[command(name = "abfv")]
 struct Args {
     /// Heavy-chain (VH) amino-acid sequence.
-    #[arg(long, value_name = "SEQ", required_unless_present = "heavy_file")]
+    #[arg(
+        long,
+        env = "ABFV_HEAVY",
+        value_name = "SEQ",
+        required_unless_present = "heavy_file"
+    )]
     heavy: Option<String>,
 
     /// File with the VH sequence (plain text or FASTA).
@@ -36,7 +43,12 @@ struct Args {
     heavy_file: Option<PathBuf>,
 
     /// Light-chain (VL) amino-acid sequence.
-    #[arg(long, value_name = "SEQ", required_unless_present = "light_file")]
+    #[arg(
+        long,
+        env = "ABFV_LIGHT",
+        value_name = "SEQ",
+        required_unless_present = "light_file"
+    )]
     light: Option<String>,
 
     /// File with the VL sequence (plain text or FASTA).
@@ -77,15 +89,15 @@ enum PredictCmd {
 #[derive(clap::Args, Debug)]
 struct PredictArgs {
     /// Python interpreter (defaults to the ABodyBuilder3 venv).
-    #[arg(long, value_name = "PATH", default_value = DEFAULT_PYTHON)]
+    #[arg(long, env = "ABFV_PYTHON", value_name = "PATH", default_value = DEFAULT_PYTHON)]
     python: PathBuf,
 
     /// Worker script that wraps the predictor.
-    #[arg(long, value_name = "PATH", default_value = DEFAULT_SCRIPT)]
+    #[arg(long, env = "ABFV_SCRIPT", value_name = "PATH", default_value = DEFAULT_SCRIPT)]
     script: PathBuf,
 
     /// ABodyBuilder3 checkpoint (.ckpt).
-    #[arg(long, value_name = "PATH", default_value = DEFAULT_CHECKPOINT)]
+    #[arg(long, env = "ABFV_CHECKPOINT", value_name = "PATH", default_value = DEFAULT_CHECKPOINT)]
     checkpoint: PathBuf,
 
     /// RNG seed for the predictor, for reproducible structures.
@@ -107,12 +119,19 @@ enum FreesasaCmd {
     Freesasa(FreesasaArgs),
 }
 
+/// Read an env var, falling back to a compile-time default.
+/// Mirrors clap's `env = ...` precedence for the code paths where a subcommand
+/// is omitted and the `Default` impl (rather than the clap parser) supplies values.
+fn env_or(key: &str, default: &str) -> PathBuf {
+    std::env::var(key).unwrap_or_else(|_| default.to_string()).into()
+}
+
 impl Default for PredictArgs {
     fn default() -> Self {
         Self {
-            python: DEFAULT_PYTHON.into(),
-            script: DEFAULT_SCRIPT.into(),
-            checkpoint: DEFAULT_CHECKPOINT.into(),
+            python: env_or("ABFV_PYTHON", DEFAULT_PYTHON),
+            script: env_or("ABFV_SCRIPT", DEFAULT_SCRIPT),
+            checkpoint: env_or("ABFV_CHECKPOINT", DEFAULT_CHECKPOINT),
             seed: DEFAULT_SEED,
             out_file: DEFAULT_OUT_FILE.into(),
             freesasa: None,
@@ -123,7 +142,7 @@ impl Default for PredictArgs {
 #[derive(clap::Args, Debug)]
 struct FreesasaArgs {
     /// FreeSASA binary.
-    #[arg(long, value_name = "PATH", default_value = DEFAULT_FREESASA)]
+    #[arg(long, env = "ABFV_FREESASA", value_name = "PATH", default_value = DEFAULT_FREESASA)]
     binary: PathBuf,
 
     /// Output format, passed as `--format=<FORMAT>`.
@@ -138,7 +157,7 @@ struct FreesasaArgs {
 impl Default for FreesasaArgs {
     fn default() -> Self {
         Self {
-            binary: DEFAULT_FREESASA.into(),
+            binary: env_or("ABFV_FREESASA", DEFAULT_FREESASA),
             format: DEFAULT_FORMAT.into(),
             visualize: None,
         }
@@ -155,11 +174,11 @@ enum VisualizeCmd {
 #[derive(clap::Args, Debug)]
 struct VisualizeArgs {
     /// Python interpreter (defaults to the ABodyBuilder3 venv).
-    #[arg(long, value_name = "PATH", default_value = DEFAULT_PYTHON)]
+    #[arg(long, env = "ABFV_PYTHON", value_name = "PATH", default_value = DEFAULT_PYTHON)]
     python: PathBuf,
 
     /// Worker script that renders the plot.
-    #[arg(long, value_name = "PATH", default_value = DEFAULT_VISUALIZE)]
+    #[arg(long, env = "ABFV_VISUALIZE", value_name = "PATH", default_value = DEFAULT_VISUALIZE)]
     script: PathBuf,
 
     /// Output PNG file name (written under the top-level `--out-dir`).
@@ -170,8 +189,8 @@ struct VisualizeArgs {
 impl Default for VisualizeArgs {
     fn default() -> Self {
         Self {
-            python: DEFAULT_PYTHON.into(),
-            script: DEFAULT_VISUALIZE.into(),
+            python: env_or("ABFV_PYTHON", DEFAULT_PYTHON),
+            script: env_or("ABFV_VISUALIZE", DEFAULT_VISUALIZE),
             out_file: DEFAULT_PLOT_FILE.into(),
         }
     }

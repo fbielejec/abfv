@@ -1,0 +1,19 @@
+name: abfv
+channels:
+  - conda-forge
+  - pytorch
+  - nodefaults
+dependencies:
+  - python=3.9
+  - pip>=21.0
+  - numpy=1.21.6
+  - pytorch=2.0.1
+  - cpuonly
+  - openmm=7.7
+  - pdbfixer=1.8.1
+  - scipy=1.11.2
+  # mkl 2024+ dropped the bundled ITT symbols (libittnotify), so the conda
+  # pytorch 2.0.1 cpuonly build fails to load with
+  # "libtorch_cpu.so: undefined symbol: iJIT_NotifyEvent". Pin to the last
+  # 2023 line, which still ships those symbols.
+  - mkl=2023.*
