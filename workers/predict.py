@@ -6,9 +6,21 @@ import argparse
 # import sys
 # from pathlib import Path
 import os
+import random
+import numpy as np
 import torch
 from abodybuilder3.utils import string_to_input, output_to_pdb, add_atom37_to_output
 from abodybuilder3.lightning_module import LitABB3
+
+
+def set_seeds(seed):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    torch.use_deterministic_algorithms(True, warn_only=True)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
 
 
 def main():
@@ -24,6 +36,13 @@ def main():
         help="Path to the ABodyBuilder3 checkpoint (.ckpt) file.",
     )
     parser.add_argument(
+        "-s",
+        "--seed",
+        type=int,
+        default=42,
+        help="RNG seed for reproducible predictions (default: 42).",
+    )
+    parser.add_argument(
         "-o",
         "--out-dir",
         default="./out",
@@ -37,6 +56,8 @@ def main():
     )
 
     args = parser.parse_args()
+
+    set_seeds(args.seed)
 
     os.makedirs(args.out_dir, exist_ok=True)
 

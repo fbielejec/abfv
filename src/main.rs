@@ -15,6 +15,7 @@ const DEFAULT_PYTHON: &str = "/home/filip/CloudStation/Python/abodybuilder3/.ven
 const DEFAULT_SCRIPT: &str = "workers/predict.py";
 const DEFAULT_CHECKPOINT: &str =
     "/home/filip/CloudStation/Python/abodybuilder3/output/plddt-loss/best_second_stage.ckpt";
+const DEFAULT_SEED: u64 = 42;
 const DEFAULT_OUT_DIR: &str = "out";
 const DEFAULT_OUT_FILE: &str = "complex.pdb";
 const DEFAULT_FREESASA: &str = "/home/filip/CloudStation/Python/freesasa/src/freesasa";
@@ -73,7 +74,6 @@ enum PredictCmd {
     Predict(PredictArgs),
 }
 
-// TODO : fix seed
 #[derive(clap::Args, Debug)]
 struct PredictArgs {
     /// Python interpreter (defaults to the ABodyBuilder3 venv).
@@ -87,6 +87,10 @@ struct PredictArgs {
     /// ABodyBuilder3 checkpoint (.ckpt).
     #[arg(long, value_name = "PATH", default_value = DEFAULT_CHECKPOINT)]
     checkpoint: PathBuf,
+
+    /// RNG seed for the predictor, for reproducible structures.
+    #[arg(long, value_name = "N", default_value_t = DEFAULT_SEED)]
+    seed: u64,
 
     /// Output PDB file name (written under the top-level `--out-dir`).
     #[arg(long, value_name = "FILE", default_value = DEFAULT_OUT_FILE)]
@@ -109,6 +113,7 @@ impl Default for PredictArgs {
             python: DEFAULT_PYTHON.into(),
             script: DEFAULT_SCRIPT.into(),
             checkpoint: DEFAULT_CHECKPOINT.into(),
+            seed: DEFAULT_SEED,
             out_file: DEFAULT_OUT_FILE.into(),
             freesasa: None,
         }
@@ -506,6 +511,8 @@ fn predict_structure(
         .arg(heavy)
         .arg("--checkpoint")
         .arg(&predict.checkpoint)
+        .arg("--seed")
+        .arg(predict.seed.to_string())
         .arg("--out-dir")
         .arg(out_dir)
         .arg("--out-file")
