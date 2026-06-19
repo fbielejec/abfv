@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::fmt::Write;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -18,6 +19,7 @@ const DEFAULT_OUT_DIR: &str = "out";
 const DEFAULT_OUT_FILE: &str = "complex.pdb";
 const DEFAULT_FREESASA: &str = "/home/filip/CloudStation/Python/freesasa/src/freesasa";
 const DEFAULT_FORMAT: &str = "rsa";
+const DEFAULT_OUT_CSV: &str = "contacts.csv";
 
 #[derive(Parser, Debug)]
 #[command(name = "abfv")]
@@ -53,6 +55,10 @@ struct Args {
     /// `predict` step + its options (omit to use defaults). Chains into `freesasa`.
     #[command(subcommand)]
     predict: Option<PredictCmd>,
+
+    /// File with the VL sequence (plain text or FASTA).
+    #[arg(long, value_name = "OUT_CSV", default_value = DEFAULT_OUT_CSV)]
+    contacts_out_csv_file: PathBuf,
 
     // /// Skip the visualization step.
     // #[arg(long)]
@@ -282,14 +288,16 @@ fn run(args: Args) -> Result<(), AbfvError> {
     }
 
     // 4. dSASA + contacts -> metric @ threshold
-    delta_sasa(
+    let contacts = delta_sasa(
         out_dir.join("complex.rsa"),
         out_dir.join("heavy.rsa"),
         out_dir.join("light.rsa"),
         args.threshold,
     )?;
 
-    // 5. write contacts.csv / contacts.json
+    // 5. write contacts.csv
+    write_csv(&out_dir.join(args.contacts_csv_file), &contacts)?;
+
     // 6. visualize           -> workers/visualize.py (TODO --no-viz)
 
     Ok(())
@@ -307,7 +315,7 @@ fn delta_sasa(
     heavy_rsa: PathBuf,
     light_rsa: PathBuf,
     contact_threshold: f64,
-) -> Result<(), AbfvError> {
+) -> Result<Vec<ContactRow>, AbfvError> {
     let complex = parse_rsa(&complex_rsa)?;
 
     let mut isolated = parse_rsa(&heavy_rsa)?;
@@ -319,7 +327,7 @@ fn delta_sasa(
         "isolated and complex should be equal!"
     );
 
-    let mut contact_rows: Vec<ContactRow> = vec![];
+    let mut contacts: Vec<ContactRow> = vec![];
 
     for (key @ (chain, residue_name, residue_number), complex_residue) in &complex {
         // println!("complex residue: {complex_residue:?}");
@@ -338,7 +346,7 @@ fn delta_sasa(
             f64::NAN
         };
 
-        contact_rows.push(ContactRow {
+        contacts.push(ContactRow {
             chain: *chain,
             residue_name: residue_name.to_string(),
             residue_number: *residue_number,
@@ -349,7 +357,7 @@ fn delta_sasa(
         });
     }
 
-    Ok(())
+    Ok(contacts)
 }
 
 fn parse_rsa(rsa: &Path) -> Result<HashMap<ResidueKey, ResidueSasa>, AbfvError> {
@@ -471,6 +479,29 @@ fn predict_structure(
     }
 
     Ok(out_dir.join(&predict.out_file))
+}
+
+fn write_csv(path: &Path, rows: &[ContactRow]) -> Result<(), AbfvError> {
+    let mut out =
+        String::from("chain,resnum,resname,sc_abs_iso,sc_abs_cplx,first_pct,is_contact\n");
+
+    for r in rows {
+        _ = writeln!(
+            out,
+            "{},{},{},{:.3},{:.3},{:.3},{}",
+            r.chain,
+            r.residue_number,
+            r.residue_name,
+            r.iso_side_chain_absolute,
+            r.complex_side_chain_absolute,
+            r.contact_metric,
+            r.is_contact,
+        );
+    }
+
+    fs::write(path, out)?;
+
+    Ok(())
 }
 
 fn init_tracing(filter: &str) {
