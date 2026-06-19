@@ -16,7 +16,7 @@ const STANDARD_AA: &str = "ACDEFGHIKLMNPQRSTVWY";
 // For host-specific use a local `.env` file (see `.env.example`)
 const DEFAULT_PYTHON: &str = "python3";
 const DEFAULT_SCRIPT: &str = "workers/predict.py";
-const DEFAULT_CHECKPOINT: &str = "model/best_second_stage.ckpt";
+const DEFAULT_CHECKPOINT: &str = "vendored/best_second_stage.ckpt";
 const DEFAULT_SEED: u64 = 42;
 const DEFAULT_OUT_DIR: &str = "out";
 const DEFAULT_OUT_FILE: &str = "complex.pdb";
