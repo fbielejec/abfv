@@ -6,3 +6,4 @@ mvp.ipynb
 .git/
 __pycache__/
 *.pyc
+.env

@@ -13,25 +13,12 @@ RUN mkdir src && echo 'fn main() {}' > src/main.rs && cargo build --release || t
 COPY src ./src
 RUN touch src/main.rs && cargo build --release
 
-# ---- Stage B: vendor + build FreeSASA 2.1.3 ----
-FROM debian:bookworm-slim AS freesasa-builder
-ARG FREESASA_VERSION=2.1.3
-# pkg-config: ships pkg.m4, which provides the PKG_CHECK_MODULES macro used in
-# configure.ac. Without it autoreconf misparses and reports AC_DEFINE / AM_CONDITIONAL
-# / AC_SUBST / AC_MSG_ERROR as "possibly undefined macro".
-RUN apt-get update && apt-get install -y --no-install-recommends \
-      build-essential autoconf automake libtool pkg-config curl ca-certificates \
- && rm -rf /var/lib/apt/lists/*
-WORKDIR /build
-RUN curl -fSL "https://github.com/mittinatten/freesasa/archive/refs/tags/${FREESASA_VERSION}.tar.gz" \
-    | tar xz
-WORKDIR /build/freesasa-${FREESASA_VERSION}
-RUN autoreconf -i \
- && ./configure --disable-json --disable-xml \
- && make -j"$(nproc)"
-# Resulting binary: src/freesasa
+# FreeSASA is a prebuilt 2.1.3 binary that lives in `vendored/`
+# (compiled with `--disable-json  --disable-xml`,
+# so it is ABI-compatible with the runtime stage and needs only
+# libstdc++/libm/libc). It is COPY'd straight into the runtime stage below.
 
-# ---- Stage C: build + slim the conda env (heavy; discarded, only the env dir
+# ---- Stage B: build + slim the conda env (heavy; discarded, only the env dir
 #      and the checkpoint are copied forward) ----
 FROM mambaorg/micromamba:1.5-bookworm AS env-builder
 ARG ABB3_COMMIT=18e4058015a39c5405c08a0d5629cf302627b253
@@ -85,31 +72,23 @@ from abodybuilder3.lightning_module import LitABB3; \
 import pandas, matplotlib; \
 print('imports OK')"
 
-# Bake the model checkpoint: download the Zenodo tarball and extract ONLY the one
-# checkpoint we use (the tarball is ~421 MB and bundles several .ckpt files).
-ARG ZENODO_RECORD=11354577
-RUN curl -fSL "https://zenodo.org/records/${ZENODO_RECORD}/files/output.tar.gz" -o /tmp/output.tar.gz \
- && mkdir -p /opt/abfv/model \
- && tar -xzf /tmp/output.tar.gz -C /tmp plddt-loss/best_second_stage.ckpt \
- && mv /tmp/plddt-loss/best_second_stage.ckpt /opt/abfv/model/best_second_stage.ckpt \
- && rm -rf /tmp/output.tar.gz /tmp/plddt-loss
+# The model checkpoint lives in `vendored/best_second_stage.ckpt`
+# and is COPY'd straight into the runtime stage below.
 
-# ---- Stage D: minimal runtime ----
+# ---- Stage C: minimal runtime ----
 # Fresh micromamba base (no apt/pip build layers); we COPY in just the slimmed
 # conda env, the checkpoint, the two binaries, and the workers/examples.
 FROM mambaorg/micromamba:1.5-bookworm AS runtime
-# Re-declared here (ARGs are stage-scoped) so the freesasa COPY path stays in
-# sync with the version built in the freesasa-builder stage.
-ARG FREESASA_VERSION=2.1.3
 USER root
 
-# Slimmed conda env + baked checkpoint (final directory state from env-builder)
+# Slimmed conda env (final directory state from env-builder)
 COPY --from=env-builder /opt/conda/envs/abfv /opt/conda/envs/abfv
-COPY --from=env-builder /opt/abfv/model      /opt/abfv/model
 
-# Binaries from the builder stages + workers + examples
-COPY --from=rust-builder     /build/target/release/abfv          /opt/abfv/bin/abfv
-COPY --from=freesasa-builder /build/freesasa-${FREESASA_VERSION}/src/freesasa  /opt/abfv/bin/freesasa
+# abfv binary from the rust-builder stage; freesasa + checkpoint from the
+# vendored prebuilts; plus workers + examples
+COPY --from=rust-builder /build/target/release/abfv /opt/abfv/bin/abfv
+COPY vendored/freesasa                /opt/abfv/bin/freesasa
+COPY vendored/best_second_stage.ckpt  /opt/abfv/model/best_second_stage.ckpt
 COPY workers/  /opt/abfv/workers/
 COPY examples/ /opt/abfv/examples/
 

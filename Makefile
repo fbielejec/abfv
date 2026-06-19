@@ -2,10 +2,10 @@
 VENV ?= /home/filip/CloudStation/Python/abodybuilder3/.venv
 
 # ABodyBuilder3 checkpoint (override: make predict CKPT=/path/to/model.ckpt)
-CKPT ?= /home/filip/CloudStation/Python/abodybuilder3/output/plddt-loss/best_second_stage.ckpt
+CKPT ?= vendored/best_second_stage.ckpt
 
 # FreeSASA binary (override: make freesasa FREESASA=/path/to/freesasa)
-FREESASA ?= /home/filip/CloudStation/Python/freesasa/src/freesasa
+FREESASA ?= vendored/freesasa
 
 # Hardcoded example Fv chains (verbatim from examples/light.fasta and examples/heavy.fasta)
 LIGHT := DIQMTQSPSSLSASVGDRVTITCSASQDISNYLNWYQQKPGKAPKVLIYFTSSLHSGVPSRFSGSGSGTDFTLTISSLQPEDFATYYCQQYSTVPWTFGQGTKVEIK
