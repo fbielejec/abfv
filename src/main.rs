@@ -5,8 +5,10 @@ use std::process::Command;
 use tracing::{error, info};
 use tracing_subscriber::{EnvFilter, prelude::*};
 
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{Parser, Subcommand};
 use thiserror::Error;
+
+const STANDARD_AA: &str = "ACDEFGHIKLMNPQRSTVWY";
 
 const DEFAULT_PYTHON: &str = "/home/filip/CloudStation/Python/abodybuilder3/.venv/bin/python";
 const DEFAULT_SCRIPT: &str = "workers/predict.py";
@@ -16,16 +18,6 @@ const DEFAULT_OUT_DIR: &str = "out";
 const DEFAULT_OUT_FILE: &str = "complex.pdb";
 const DEFAULT_FREESASA: &str = "/home/filip/CloudStation/Python/freesasa/src/freesasa";
 const DEFAULT_FORMAT: &str = "rsa";
-
-#[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
-enum Metric {
-    /// Relative drop in side-chain SASA: (iso − cplx) / iso >= threshold.
-    First,
-    /// Drop in RSA percentage points: rel_iso − rel_cplx >= threshold.
-    Second,
-    /// Report and flag under both.
-    Both,
-}
 
 #[derive(Parser, Debug)]
 #[command(name = "abfv")]
@@ -46,12 +38,8 @@ struct Args {
     #[arg(long, value_name = "PATH", conflicts_with = "light")]
     light_file: Option<PathBuf>,
 
-    /// Contact metric (which reading of the >= 10% rule).
-    #[arg(long, value_enum, default_value_t = Metric::Both)]
-    metric: Metric,
-
     /// Contact threshold (percent for `first`, percentage points for `second`).
-    #[arg(long, default_value_t = 10.0)]
+    #[arg(long, default_value_t = 0.1)]
     threshold: f64,
 
     /// Allow `X` (unknown) residues. Off by default.
@@ -158,12 +146,32 @@ enum AbfvError {
         stderr: String,
     },
 
-    #[error("failed to parse {what}: {reason}")]
-    #[allow(dead_code)] // TODO: constructed once FreeSASA/contacts parsing lands
-    Parse { what: String, reason: String },
+    #[error("failed to parse {what}: {why}")]
+    Parse { what: String, why: String },
+
+    #[error("failed to read: {why}")]
+    Data { why: String },
 }
 
-const STANDARD_AA: &str = "ACDEFGHIKLMNPQRSTVWY";
+// composite key - chain (H/L), residue_name (e.g., ASP, ILE), residue_number
+pub type ResidueKey = (char, String, u32);
+
+/// Solvent Accessible SUrface Area entry as parsed from freeSASA .rsa file
+#[derive(Debug)]
+pub struct ResidueSasa {
+    /// ABS Absolute accessibility value
+    pub side_chain_absolute: f64,
+}
+
+struct ContactRow {
+    chain: char,
+    residue_name: String,
+    residue_number: u32,
+    iso_side_chain_absolute: f64,
+    complex_side_chain_absolute: f64,
+    contact_metric: f64,
+    is_contact: bool,
+}
 
 fn clean_and_validate(
     raw: &str,
@@ -273,11 +281,12 @@ fn run(args: Args) -> Result<(), AbfvError> {
         info!(path = %rsa.display(), "Wrote RSA file");
     }
 
-    // 4. dSASA + contacts    -> metric first/second @ threshold
+    // 4. dSASA + contacts -> metric @ threshold
     delta_sasa(
         out_dir.join("complex.rsa"),
         out_dir.join("heavy.rsa"),
         out_dir.join("light.rsa"),
+        args.threshold,
     )?;
 
     // 5. write contacts.csv / contacts.json
@@ -293,60 +302,62 @@ fn main() -> Result<(), AbfvError> {
     Ok(())
 }
 
-// isolated = {**rsa["heavy"], **rsa["light"]}
-
-// rows = []
-// for key, cplx in rsa["complex"].items():
-//     chain, resnum, resname = key
-//     iso = isolated[key]
-//     sc_abs_iso, sc_abs_cplx = iso["sc_abs"], cplx["sc_abs"]
-//     sc_rel_iso, sc_rel_cplx = iso["sc_rel"], cplx["sc_rel"]
-//     d_abs = sc_abs_iso - sc_abs_cplx
-//     d_rel_pct = (d_abs / sc_abs_iso * 100) if sc_abs_iso > 0 else math.nan   # metric 'first'
-//     d_rsa_pts = sc_rel_iso - sc_rel_cplx                                      # metric 'second'
-//     rows.append(dict(chain = chain, resnum = resnum, resname = resname,
-//                      sc_abs_iso = sc_abs_iso, sc_abs_cplx = sc_abs_cplx,
-//                      sc_rel_iso = sc_rel_iso, sc_rel_cplx = sc_rel_cplx,
-//                      d_abs = d_abs, d_rel_pct = d_rel_pct, d_rsa_pts = d_rsa_pts))
-
 fn delta_sasa(
     complex_rsa: PathBuf,
     heavy_rsa: PathBuf,
     light_rsa: PathBuf,
+    contact_threshold: f64,
 ) -> Result<(), AbfvError> {
     let complex = parse_rsa(&complex_rsa)?;
-    let heavy = parse_rsa(&complex_rsa)?;
-    let light = parse_rsa(&complex_rsa)?;
 
-    println!("@ {complex:#?}");
+    let mut isolated = parse_rsa(&heavy_rsa)?;
+    isolated.extend(parse_rsa(&light_rsa)?);
+
+    assert_eq!(
+        complex.len(),
+        isolated.len(),
+        "isolated and complex should be equal!"
+    );
+
+    let mut contact_rows: Vec<ContactRow> = vec![];
+
+    for (key @ (chain, residue_name, residue_number), complex_residue) in &complex {
+        // println!("complex residue: {complex_residue:?}");
+        // println!("iso residue: {iso_residue:?}");
+
+        let iso_residue = isolated.get(key).ok_or(AbfvError::Data {
+            why: format!("isolated map does not contain residue: {:?}", key),
+        })?;
+
+        let delta = iso_residue.side_chain_absolute - complex_residue.side_chain_absolute;
+
+        // first
+        let contact_metric = if delta > 0.0 {
+            delta / iso_residue.side_chain_absolute
+        } else {
+            f64::NAN
+        };
+
+        contact_rows.push(ContactRow {
+            chain: *chain,
+            residue_name: residue_name.to_string(),
+            residue_number: *residue_number,
+            iso_side_chain_absolute: iso_residue.side_chain_absolute,
+            complex_side_chain_absolute: complex_residue.side_chain_absolute,
+            contact_metric,
+            is_contact: contact_metric >= contact_threshold,
+        });
+    }
 
     Ok(())
 }
-
-/// Solvent Accessible SUrface Area entry as parsed from freeSASA .rsa file
-#[derive(Debug)]
-pub struct ResidueSasa {
-    /// Chain (H / L)
-    pub chain: char,
-    /// RES Residue name (e.g., ASP, ILE)
-    pub residue_name: String,
-    /// NUM Residue number
-    pub residue_number: u32,
-    /// ABS Absolute accessibility value
-    pub side_chain_absolute: f64,
-    /// REL Relative accessibility value
-    pub side_chain_relative: f64,
-}
-
-// composite key - chain, residue_name, residue_number
-pub type ResidueKey = (char, String, u32);
 
 fn parse_rsa(rsa: &Path) -> Result<HashMap<ResidueKey, ResidueSasa>, AbfvError> {
     let text = fs::read_to_string(rsa)?;
 
     let err = |line_no: usize, reason: String| AbfvError::Parse {
         what: format!("RSA file {} (line {line_no})", rsa.display()),
-        reason,
+        why: reason,
     };
 
     // RES resname chain resnum  all(abs rel)  side(abs rel)  main(..) nonpolar(..) polar(..)
@@ -380,25 +391,12 @@ fn parse_rsa(rsa: &Path) -> Result<HashMap<ResidueKey, ResidueSasa>, AbfvError> 
                 .parse::<f64>()
                 .map_err(|e| err(line_no, format!("side-chain ABS '{}': {e}", cols[6])))?;
 
-            //  "N/A" / "-" => f64::NAN
-            // else f64
-            let side_chain_relative = match cols[7] {
-                "N/A" | "-" => f64::NAN,
-                other => other
-                    .parse::<f64>()
-                    .map_err(|e| err(line_no, format!("side-chain REL '{other}': {e}")))?,
-            };
-
             let key = (chain, residue_name.clone(), residue_number);
 
             Ok((
                 key,
                 ResidueSasa {
-                    residue_name,
-                    chain,
-                    residue_number,
                     side_chain_absolute,
-                    side_chain_relative,
                 },
             ))
         })
