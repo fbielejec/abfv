@@ -20,6 +20,8 @@ const DEFAULT_OUT_FILE: &str = "complex.pdb";
 const DEFAULT_FREESASA: &str = "/home/filip/CloudStation/Python/freesasa/src/freesasa";
 const DEFAULT_FORMAT: &str = "rsa";
 const DEFAULT_OUT_CSV: &str = "contacts.csv";
+const DEFAULT_VISUALIZE: &str = "workers/visualize.py";
+const DEFAULT_PLOT_FILE: &str = "dsasa_barplot.png";
 
 #[derive(Parser, Debug)]
 #[command(name = "abfv")]
@@ -60,9 +62,6 @@ struct Args {
     #[arg(long, value_name = "OUT_CSV", default_value = DEFAULT_OUT_CSV)]
     contacts_out_csv_file: PathBuf,
 
-    // /// Skip the visualization step.
-    // #[arg(long)]
-    // no_viz: bool,
     /// Tracing filter that honors standard RUST_LOG, with sensible defaults
     #[arg(long, env = "RUST_LOG", default_value = "info,api=debug,common=debug")]
     log: String,
@@ -116,7 +115,6 @@ impl Default for PredictArgs {
     }
 }
 
-/// Options for the FreeSASA shell-out.
 #[derive(clap::Args, Debug)]
 struct FreesasaArgs {
     /// FreeSASA binary.
@@ -126,6 +124,10 @@ struct FreesasaArgs {
     /// Output format, passed as `--format=<FORMAT>`.
     #[arg(long, default_value = DEFAULT_FORMAT)]
     format: String,
+
+    /// `visualize` step + its options (omit to use defaults).
+    #[command(subcommand)]
+    visualize: Option<VisualizeCmd>,
 }
 
 impl Default for FreesasaArgs {
@@ -133,6 +135,39 @@ impl Default for FreesasaArgs {
         Self {
             binary: DEFAULT_FREESASA.into(),
             format: DEFAULT_FORMAT.into(),
+            visualize: None,
+        }
+    }
+}
+
+#[derive(Subcommand, Debug)]
+enum VisualizeCmd {
+    /// Render the per-residue dSASA bar charts with the matplotlib worker.
+    Visualize(VisualizeArgs),
+}
+
+/// Options for the matplotlib plot shell-out (`workers/visualize.py`).
+#[derive(clap::Args, Debug)]
+struct VisualizeArgs {
+    /// Python interpreter (defaults to the ABodyBuilder3 venv).
+    #[arg(long, value_name = "PATH", default_value = DEFAULT_PYTHON)]
+    python: PathBuf,
+
+    /// Worker script that renders the plot.
+    #[arg(long, value_name = "PATH", default_value = DEFAULT_VISUALIZE)]
+    script: PathBuf,
+
+    /// Output PNG file name (written under the top-level `--out-dir`).
+    #[arg(long, value_name = "FILE", default_value = DEFAULT_PLOT_FILE)]
+    out_file: String,
+}
+
+impl Default for VisualizeArgs {
+    fn default() -> Self {
+        Self {
+            python: DEFAULT_PYTHON.into(),
+            script: DEFAULT_VISUALIZE.into(),
+            out_file: DEFAULT_PLOT_FILE.into(),
         }
     }
 }
@@ -204,8 +239,6 @@ fn clean_and_validate(
     }
 
     for (i, c) in seq.chars().enumerate() {
-        let pos = i + 1;
-
         if c == 'X' {
             if allow_unknown {
                 continue;
@@ -213,14 +246,14 @@ fn clean_and_validate(
 
             return Err(AbfvError::InvalidSequence {
                 chain,
-                reason: format!("'X' at position {pos} (pass --allow-unknown to permit)"),
+                reason: format!("'X' at position {i} (pass --allow-unknown to permit)"),
             });
         }
 
         if !STANDARD_AA.contains(c) {
             return Err(AbfvError::InvalidSequence {
                 chain,
-                reason: format!("invalid residue '{c}' at position {pos}"),
+                reason: format!("invalid residue '{c}' at position {i}"),
             });
         }
     }
@@ -260,9 +293,14 @@ fn run(args: Args) -> Result<(), AbfvError> {
         None => PredictArgs::default(),
     };
 
-    let freesasa = match predict.freesasa.take() {
+    let mut freesasa = match predict.freesasa.take() {
         Some(FreesasaCmd::Freesasa(f)) => f,
         None => FreesasaArgs::default(),
+    };
+
+    let visualize = match freesasa.visualize.take() {
+        Some(VisualizeCmd::Visualize(v)) => v,
+        None => VisualizeArgs::default(),
     };
 
     // 1. predict structure -> calls workers/predict.py -> out/complex.pdb (complex chain H/L)
@@ -300,8 +338,9 @@ fn run(args: Args) -> Result<(), AbfvError> {
     write_csv(csv, &contacts)?;
     info!(path = %csv.display(), "Wrote CSV file");
 
-    // (TODO --no-viz)
-    // 6. visualize -> workers/visualize.py
+    // 6. visualize -> workers/visualize.py  (TODO --no-viz)
+    let plot = run_visualize(&visualize, &out_dir, csv, args.threshold)?;
+    info!(path = %plot.display(), "Wrote plot");
 
     Ok(())
 }
@@ -482,6 +521,36 @@ fn predict_structure(
     }
 
     Ok(out_dir.join(&predict.out_file))
+}
+
+fn run_visualize(
+    args: &VisualizeArgs,
+    out_dir: &Path,
+    contacts_csv: &Path,
+    threshold: f64,
+) -> Result<PathBuf, AbfvError> {
+    info!("Rendering contact plots with matplotlib");
+
+    let status = Command::new(&args.python)
+        .arg(&args.script)
+        .arg(contacts_csv)
+        .arg("--threshold")
+        .arg(threshold.to_string())
+        .arg("--out-dir")
+        .arg(out_dir)
+        .arg("--out-file")
+        .arg(&args.out_file)
+        .status()?;
+
+    if !status.success() {
+        return Err(AbfvError::Subprocess {
+            tool: args.script.display().to_string(),
+            code: status.code().unwrap_or(-1),
+            stderr: "see output above".into(),
+        });
+    }
+
+    Ok(out_dir.join(&args.out_file))
 }
 
 fn write_csv(path: &Path, rows: &[ContactRow]) -> Result<(), AbfvError> {

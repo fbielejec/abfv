@@ -31,7 +31,7 @@ def main():
     parser.add_argument(
         "-f",
         "--out-file",
-        default="dsasa.png",
+        default="dsasa_barplot.png",
         help="Output PNG file name.",
     )
 
@@ -43,7 +43,7 @@ def main():
 
     for axis, chain in zip(axes, ["H", "L"]):
         sub_df = df[df.chain == chain]
-        colors = ["tomatoe" if c else "lightsteelblue" for c in sub_df.is_contact_first]
+        colors = ["#ff6347" if c else "#4787ff" for c in sub_df.is_contact]
 
         axis.bar(sub_df.residue_number, sub_df.contact_metric.fillna(0),
                  color=colors, width=0.9)
@@ -54,8 +54,8 @@ def main():
         axis.set_xlabel("residue #")
         axis.margins(x=0.01)
 
-    figure.suptitle(f"per-residue side-chain contact (threshold {args.threshold:.0f}%)")
-    png_path = os.path.join(args.out_dir, "dsasa_barplot.png")
+    figure.suptitle(f"per-residue side-chain contact (threshold {args.threshold*100:.0f}%)")
+    png_path = os.path.join(args.out_dir, args.out_file)
     figure.savefig(png_path, dpi=150)
 
 
