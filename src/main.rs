@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -317,7 +318,7 @@ fn delta_sasa(
     let heavy = parse_rsa(&complex_rsa)?;
     let light = parse_rsa(&complex_rsa)?;
 
-    // println!("@@@@ {h:#?}");
+    println!("@ {complex:#?}");
 
     Ok(())
 }
@@ -335,11 +336,12 @@ pub struct ResidueSasa {
     pub side_chain_absolute: f64,
     /// REL Relative accessibility value
     pub side_chain_relative: f64,
-    // /// precision to avoid floating point values (defaults to 1e3)
-    // pub precision: u32,
 }
 
-fn parse_rsa(rsa: &Path) -> Result<Vec<ResidueSasa>, AbfvError> {
+// composite key - chain, residue_name, residue_number
+pub type ResidueKey = (char, String, u32);
+
+fn parse_rsa(rsa: &Path) -> Result<HashMap<ResidueKey, ResidueSasa>, AbfvError> {
     let text = fs::read_to_string(rsa)?;
 
     let err = |line_no: usize, reason: String| AbfvError::Parse {
@@ -363,6 +365,8 @@ fn parse_rsa(rsa: &Path) -> Result<Vec<ResidueSasa>, AbfvError> {
                 ));
             }
 
+            let residue_name = cols[1].to_string();
+
             let chain = cols[2]
                 .chars()
                 .next()
@@ -385,13 +389,18 @@ fn parse_rsa(rsa: &Path) -> Result<Vec<ResidueSasa>, AbfvError> {
                     .map_err(|e| err(line_no, format!("side-chain REL '{other}': {e}")))?,
             };
 
-            Ok(ResidueSasa {
-                residue_name: cols[1].to_string(),
-                chain,
-                residue_number,
-                side_chain_absolute,
-                side_chain_relative,
-            })
+            let key = (chain, residue_name.clone(), residue_number);
+
+            Ok((
+                key,
+                ResidueSasa {
+                    residue_name,
+                    chain,
+                    residue_number,
+                    side_chain_absolute,
+                    side_chain_relative,
+                },
+            ))
         })
         .collect()
 }
