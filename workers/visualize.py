@@ -17,6 +17,7 @@ def main():
     parser.add_argument(
         "-t",
         "--threshold",
+        type=float,
         default=0.1,
         help="Contact metric threshold value",
     )
