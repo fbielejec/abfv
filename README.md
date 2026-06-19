@@ -11,12 +11,10 @@
 
 ## Docker
 
-The whole pipeline (the `abfv` binary orchestrator, ABodyBuilder3, FreeSASA, and the
-matplotlib visualizer) is packaged into a single self-contained image (torch is CPU-only!)
+The whole pipeline (the `abfv` binary orchestrator, ABodyBuilder3, FreeSASA, and the matplotlib visualizer) 
+is packaged into a single self-contained image (torch is CPU-only!).
 
 ### Build
-
-> First build needs network!
 
 ```bash
 make docker-build
