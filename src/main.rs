@@ -296,9 +296,12 @@ fn run(args: Args) -> Result<(), AbfvError> {
     )?;
 
     // 5. write contacts.csv
-    write_csv(&out_dir.join(args.contacts_csv_file), &contacts)?;
+    let csv = &out_dir.join(args.contacts_out_csv_file);
+    write_csv(csv, &contacts)?;
+    info!(path = %csv.display(), "Wrote CSV file");
 
-    // 6. visualize           -> workers/visualize.py (TODO --no-viz)
+    // (TODO --no-viz)
+    // 6. visualize -> workers/visualize.py
 
     Ok(())
 }
@@ -482,8 +485,9 @@ fn predict_structure(
 }
 
 fn write_csv(path: &Path, rows: &[ContactRow]) -> Result<(), AbfvError> {
-    let mut out =
-        String::from("chain,resnum,resname,sc_abs_iso,sc_abs_cplx,first_pct,is_contact\n");
+    let mut out = String::from(
+        "chain,residue_number,residue_name,iso_side_chain_absolute,complex_side_chain_absolute,contact_metric,is_contact\n",
+    );
 
     for r in rows {
         _ = writeln!(

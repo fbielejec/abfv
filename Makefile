@@ -11,6 +11,9 @@ FREESASA ?= /home/filip/CloudStation/Python/freesasa/src/freesasa
 LIGHT := DIQMTQSPSSLSASVGDRVTITCSASQDISNYLNWYQQKPGKAPKVLIYFTSSLHSGVPSRFSGSGSGTDFTLTISSLQPEDFATYYCQQYSTVPWTFGQGTKVEIK
 HEAVY := EVQLVESGGGLVQPGGSLRLSCAASGYTFTNYGMNWVRQAPGKGLEWVGWINTYTGEPTYAADFKRRFTFSLDTSKSTAYLQMNSLRAEDTAVYYCAKYPHYYGSSHWYFDVWGQGTLVTVSS
 
+# Hardcoded: csv file wioth contacts metric calculated per residue
+CONTACTS := out/contacts.csv
+
 .PHONY: help
 help: # Show help for each of the Makefile recipes
 	@grep -E '^[a-zA-Z0-9 -]+:.*#'  Makefile | sort | while read -r l; do printf "\033[1;32m$$(echo $$l | cut -f 1 -d':')\033[00m:$$(echo $$l | cut -f 2- -d'#')\n"; done
@@ -56,3 +59,7 @@ freesasa: # Run FreeSASA (rsa) on the three pipeline PDBs
 	$(FREESASA) --format=rsa out/complex.pdb --output=out/complex.rsa
 	$(FREESASA) --format=rsa out/heavy.pdb --output=out/heavy.rsa
 	$(FREESASA) --format=rsa out/light.pdb --output=out/light.rsa
+
+.PHONY: visualize
+visualize: # Run visualize script
+	$(VENV)/bin/python workers/visualize.py "$(CONTACTS)"
