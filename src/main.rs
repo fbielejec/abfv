@@ -272,9 +272,12 @@ fn run(args: Args) -> Result<(), AbfvError> {
         info!(path = %rsa.display(), "Wrote RSA file");
     }
 
-    // 4. ΔSASA + contacts    -> metric first/second @ threshold
-    // TODO https://github.com/douweschulte/pdbtbx and/or polars
-    delta_sasa(out_dir.join("complex.rsa"))?;
+    // 4. dSASA + contacts    -> metric first/second @ threshold
+    delta_sasa(
+        out_dir.join("complex.rsa"),
+        out_dir.join("heavy.rsa"),
+        out_dir.join("light.rsa"),
+    )?;
 
     // 5. write contacts.csv / contacts.json
     // 6. visualize           -> workers/visualize.py (TODO --no-viz)
@@ -305,10 +308,16 @@ fn main() -> Result<(), AbfvError> {
 //                      sc_rel_iso = sc_rel_iso, sc_rel_cplx = sc_rel_cplx,
 //                      d_abs = d_abs, d_rel_pct = d_rel_pct, d_rsa_pts = d_rsa_pts))
 
-fn delta_sasa(rsa: PathBuf) -> Result<(), AbfvError> {
-    let h = parse_rsa(rsa)?;
+fn delta_sasa(
+    complex_rsa: PathBuf,
+    heavy_rsa: PathBuf,
+    light_rsa: PathBuf,
+) -> Result<(), AbfvError> {
+    let complex = parse_rsa(&complex_rsa)?;
+    let heavy = parse_rsa(&complex_rsa)?;
+    let light = parse_rsa(&complex_rsa)?;
 
-    println!("@@@@ {h:?}");
+    // println!("@@@@ {h:#?}");
 
     Ok(())
 }
@@ -330,29 +339,61 @@ pub struct ResidueSasa {
     // pub precision: u32,
 }
 
-fn parse_rsa(rsa: PathBuf) -> Result<Vec<ResidueSasa>, AbfvError> {
+fn parse_rsa(rsa: &Path) -> Result<Vec<ResidueSasa>, AbfvError> {
     let text = fs::read_to_string(rsa)?;
 
-    println!("@  {text}");
+    let err = |line_no: usize, reason: String| AbfvError::Parse {
+        what: format!("RSA file {} (line {line_no})", rsa.display()),
+        reason,
+    };
 
-    Ok(text
-        .lines()
-        .filter(|l| l.starts_with("RES"))
-        .filter_map(|l| {
+    // RES resname chain resnum  all(abs rel)  side(abs rel)  main(..) nonpolar(..) polar(..)
+    // tokens:  0    1     2      3     4   5      6    7      ...
+    text.lines()
+        .enumerate()
+        .filter(|(_, l)| l.starts_with("RES "))
+        .map(|(i, l)| {
+            let line_no = i + 1;
             let cols: Vec<&str> = l.split_whitespace().collect();
 
-            println!("@  {cols:?}");
+            if cols.len() < 8 {
+                return Err(err(
+                    line_no,
+                    format!("expected at least 8 columns, found {}: {l:?}", cols.len()),
+                ));
+            }
 
-            Some(ResidueSasa {
+            let chain = cols[2]
+                .chars()
+                .next()
+                .ok_or_else(|| err(line_no, format!("empty chain id (column 3) in {l:?}")))?;
+
+            let residue_number = cols[3]
+                .parse::<u32>()
+                .map_err(|e| err(line_no, format!("residue number '{}': {e}", cols[3])))?;
+
+            let side_chain_absolute = cols[6]
+                .parse::<f64>()
+                .map_err(|e| err(line_no, format!("side-chain ABS '{}': {e}", cols[6])))?;
+
+            //  "N/A" / "-" => f64::NAN
+            // else f64
+            let side_chain_relative = match cols[7] {
+                "N/A" | "-" => f64::NAN,
+                other => other
+                    .parse::<f64>()
+                    .map_err(|e| err(line_no, format!("side-chain REL '{other}': {e}")))?,
+            };
+
+            Ok(ResidueSasa {
                 residue_name: cols[1].to_string(),
-                chain: cols[2].chars().next()?,
-                residue_number: cols[3].parse().ok()?,
-                side_chain_absolute: cols[6].parse().ok()?,
-                side_chain_relative: cols[7].parse().ok()?,
-                // precision: 1000,
+                chain,
+                residue_number,
+                side_chain_absolute,
+                side_chain_relative,
             })
         })
-        .collect())
+        .collect()
 }
 
 fn run_freesasa(args: &FreesasaArgs, in_pdb: &Path, out_rsa: &Path) -> Result<PathBuf, AbfvError> {
