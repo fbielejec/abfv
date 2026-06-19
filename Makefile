@@ -4,6 +4,9 @@ VENV ?= /home/filip/CloudStation/Python/abodybuilder3/.venv
 # ABodyBuilder3 checkpoint (override: make predict CKPT=/path/to/model.ckpt)
 CKPT ?= /home/filip/CloudStation/Python/abodybuilder3/output/plddt-loss/best_second_stage.ckpt
 
+# FreeSASA binary (override: make freesasa FREESASA=/path/to/freesasa)
+FREESASA ?= /home/filip/CloudStation/Python/freesasa/src/freesasa
+
 # Hardcoded example Fv chains (verbatim from examples/light.fasta and examples/heavy.fasta)
 LIGHT := DIQMTQSPSSLSASVGDRVTITCSASQDISNYLNWYQQKPGKAPKVLIYFTSSLHSGVPSRFSGSGSGTDFTLTISSLQPEDFATYYCQQYSTVPWTFGQGTKVEIK
 HEAVY := EVQLVESGGGLVQPGGSLRLSCAASGYTFTNYGMNWVRQAPGKGLEWVGWINTYTGEPTYAADFKRRFTFSLDTSKSTAYLQMNSLRAEDTAVYYCAKYPHYYGSSHWYFDVWGQGTLVTVSS
@@ -46,4 +49,10 @@ predict: # Predict the Fv structure for the hardcoded example chains
 
 .PHONY: run
 run: # Run the abfv Rust CLI on the hardcoded example chains
-	cargo run -- --heavy "$(HEAVY)" --light "$(LIGHT)" predict --checkpoint "$(CKPT)" freesasa --binary "/home/filip/CloudStation/Python/freesasa/src/freesasa"
+	cargo run -- --heavy "$(HEAVY)" --light "$(LIGHT)" predict --checkpoint "$(CKPT)" freesasa --binary "$(FREESASA)"
+
+.PHONY: freesasa
+freesasa: # Run FreeSASA (rsa) on the three pipeline PDBs
+	$(FREESASA) --format=rsa out/complex.pdb --output=out/complex.rsa
+	$(FREESASA) --format=rsa out/heavy.pdb --output=out/heavy.rsa
+	$(FREESASA) --format=rsa out/light.pdb --output=out/light.rsa

@@ -1,3 +1,4 @@
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use tracing::{error, info};
@@ -56,6 +57,10 @@ struct Args {
     #[arg(long)]
     allow_unknown: bool,
 
+    /// Output directory for all tools (predict + freesasa).
+    #[arg(long, value_name = "DIR", default_value = DEFAULT_OUT_DIR)]
+    out_dir: PathBuf,
+
     /// `predict` step + its options (omit to use defaults). Chains into `freesasa`.
     #[command(subcommand)]
     predict: Option<PredictCmd>,
@@ -68,14 +73,13 @@ struct Args {
     log: String,
 }
 
-/// `predict` subcommand keyword (chains into `freesasa`).
 #[derive(Subcommand, Debug)]
 enum PredictCmd {
     /// Fold the Fv with the ABodyBuilder3 worker script.
     Predict(PredictArgs),
 }
 
-/// Options for the ABodyBuilder3 worker (`workers/predict.py`).
+// TODO : fix seed
 #[derive(clap::Args, Debug)]
 struct PredictArgs {
     /// Python interpreter (defaults to the ABodyBuilder3 venv).
@@ -90,11 +94,7 @@ struct PredictArgs {
     #[arg(long, value_name = "PATH", default_value = DEFAULT_CHECKPOINT)]
     checkpoint: PathBuf,
 
-    /// Output directory.
-    #[arg(long, value_name = "DIR", default_value = DEFAULT_OUT_DIR)]
-    out_dir: PathBuf,
-
-    /// Output PDB file name (written under `--out-dir`).
+    /// Output PDB file name (written under the top-level `--out-dir`).
     #[arg(long, value_name = "FILE", default_value = DEFAULT_OUT_FILE)]
     out_file: String,
 
@@ -103,7 +103,6 @@ struct PredictArgs {
     freesasa: Option<FreesasaCmd>,
 }
 
-/// `freesasa` subcommand keyword (nested under `predict`).
 #[derive(Subcommand, Debug)]
 enum FreesasaCmd {
     /// Run FreeSASA on the predicted PDBs.
@@ -116,7 +115,6 @@ impl Default for PredictArgs {
             python: DEFAULT_PYTHON.into(),
             script: DEFAULT_SCRIPT.into(),
             checkpoint: DEFAULT_CHECKPOINT.into(),
-            out_dir: DEFAULT_OUT_DIR.into(),
             out_file: DEFAULT_OUT_FILE.into(),
             freesasa: None,
         }
@@ -240,6 +238,8 @@ fn run(args: Args) -> Result<(), AbfvError> {
 
     info!("Inputs validated");
 
+    let out_dir = args.out_dir;
+
     let mut predict = match args.predict {
         Some(PredictCmd::Predict(p)) => p,
         None => PredictArgs::default(),
@@ -250,26 +250,31 @@ fn run(args: Args) -> Result<(), AbfvError> {
         None => FreesasaArgs::default(),
     };
 
-    // 1. predict structure -> calls workers/predict.py -> out/complex.pdb (chains H/L)
-    let complex_pdb = predict_structure(&predict, &heavy, &light)?;
+    // 1. predict structure -> calls workers/predict.py -> out/complex.pdb (complex chain H/L)
+    let complex_pdb = predict_structure(&predict, &out_dir, &heavy, &light)?;
     info!(path = %complex_pdb.display(), "Predicted Fv structure");
 
-    // 2. split chains -> produces heavy.pdb / light.pdb
+    // 2. split chains -> produces heavy.pdb / light.pdb (isolated chains)
     info!("Splitting complex into single-chain PDBs");
     let heavy_pdb = split_chain(&complex_pdb, 'H', "heavy.pdb")?;
     // info!(path = %dst.display(), "wrote chain {chain}");
     let light_pdb = split_chain(&complex_pdb, 'L', "light.pdb")?;
-    info!(heavy = %heavy_pdb.display(), light = %light_pdb.display(), "Split chains");
+    info!(heavy = %heavy_pdb.display(), light = %light_pdb.display(), "Wote split chains");
 
     // 3. call FreeSASA on each chain -> produces per-residue side-chain SASA (complex, heavy, light)
-    for pdb in [&complex_pdb, &heavy_pdb, &light_pdb] {
-        info!(pdb = %pdb.display(), "Running FreeSASA");
-        let rsa = run_freesasa(&freesasa, pdb)?;
-        info!(path = %rsa.display(), "wrote RSA file");
+    for (pdb_in_file, rsa_out_file) in [
+        (&complex_pdb, "complex.rsa"),
+        (&heavy_pdb, "heavy.rsa"),
+        (&light_pdb, "light.rsa"),
+    ] {
+        info!(pdb = %pdb_in_file.display(), "Running FreeSASA");
+        let rsa = run_freesasa(&freesasa, pdb_in_file, &out_dir.join(rsa_out_file))?;
+        info!(path = %rsa.display(), "Wrote RSA file");
     }
 
     // 4. ΔSASA + contacts    -> metric first/second @ threshold
     // TODO https://github.com/douweschulte/pdbtbx and/or polars
+    delta_sasa(out_dir.join("complex.rsa"))?;
 
     // 5. write contacts.csv / contacts.json
     // 6. visualize           -> workers/visualize.py (TODO --no-viz)
@@ -284,29 +289,90 @@ fn main() -> Result<(), AbfvError> {
     Ok(())
 }
 
-fn run_freesasa(fs: &FreesasaArgs, pdb: &Path) -> Result<PathBuf, AbfvError> {
-    let output = Command::new(&fs.binary)
-        .arg(format!("--format={}", fs.format))
-        .arg(pdb)
+// isolated = {**rsa["heavy"], **rsa["light"]}
+
+// rows = []
+// for key, cplx in rsa["complex"].items():
+//     chain, resnum, resname = key
+//     iso = isolated[key]
+//     sc_abs_iso, sc_abs_cplx = iso["sc_abs"], cplx["sc_abs"]
+//     sc_rel_iso, sc_rel_cplx = iso["sc_rel"], cplx["sc_rel"]
+//     d_abs = sc_abs_iso - sc_abs_cplx
+//     d_rel_pct = (d_abs / sc_abs_iso * 100) if sc_abs_iso > 0 else math.nan   # metric 'first'
+//     d_rsa_pts = sc_rel_iso - sc_rel_cplx                                      # metric 'second'
+//     rows.append(dict(chain = chain, resnum = resnum, resname = resname,
+//                      sc_abs_iso = sc_abs_iso, sc_abs_cplx = sc_abs_cplx,
+//                      sc_rel_iso = sc_rel_iso, sc_rel_cplx = sc_rel_cplx,
+//                      d_abs = d_abs, d_rel_pct = d_rel_pct, d_rsa_pts = d_rsa_pts))
+
+fn delta_sasa(rsa: PathBuf) -> Result<(), AbfvError> {
+    let h = parse_rsa(rsa)?;
+
+    println!("@@@@ {h:?}");
+
+    Ok(())
+}
+
+/// Solvent Accessible SUrface Area entry as parsed from freeSASA .rsa file
+#[derive(Debug)]
+pub struct ResidueSasa {
+    /// Chain (H / L)
+    pub chain: char,
+    /// RES Residue name (e.g., ASP, ILE)
+    pub residue_name: String,
+    /// NUM Residue number
+    pub residue_number: u32,
+    /// ABS Absolute accessibility value
+    pub side_chain_absolute: f64,
+    /// REL Relative accessibility value
+    pub side_chain_relative: f64,
+    // /// precision to avoid floating point values (defaults to 1e3)
+    // pub precision: u32,
+}
+
+fn parse_rsa(rsa: PathBuf) -> Result<Vec<ResidueSasa>, AbfvError> {
+    let text = fs::read_to_string(rsa)?;
+
+    println!("@  {text}");
+
+    Ok(text
+        .lines()
+        .filter(|l| l.starts_with("RES"))
+        .filter_map(|l| {
+            let cols: Vec<&str> = l.split_whitespace().collect();
+
+            println!("@  {cols:?}");
+
+            Some(ResidueSasa {
+                residue_name: cols[1].to_string(),
+                chain: cols[2].chars().next()?,
+                residue_number: cols[3].parse().ok()?,
+                side_chain_absolute: cols[6].parse().ok()?,
+                side_chain_relative: cols[7].parse().ok()?,
+                // precision: 1000,
+            })
+        })
+        .collect())
+}
+
+fn run_freesasa(args: &FreesasaArgs, in_pdb: &Path, out_rsa: &Path) -> Result<PathBuf, AbfvError> {
+    let output = Command::new(&args.binary)
+        .arg(format!("--format={}", args.format))
+        .arg(format!("--output={}", out_rsa.display()))
+        .arg(in_pdb)
         .output()?;
 
     if !output.status.success() {
         return Err(AbfvError::Subprocess {
-            tool: fs.binary.display().to_string(),
+            tool: args.binary.display().to_string(),
             code: output.status.code().unwrap_or(-1),
             stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
         });
     }
 
-    let rsa_path = pdb.with_extension("rsa");
-    std::fs::write(&rsa_path, &output.stdout)?;
-
-    Ok(rsa_path)
+    Ok(out_rsa.to_path_buf())
 }
 
-/// Write the records for one `chain` of `complex_pdb` to `name` next to it (the
-/// 'isolated' reference state); returns the written path. Keeps ATOM/HETATM/TER
-/// records whose chain id (column 22, 0-based index 21) matches, then a trailing `END`.
 fn split_chain(complex_pdb: &Path, chain: char, name: &str) -> Result<PathBuf, AbfvError> {
     let pdb = std::fs::read_to_string(complex_pdb)?;
     let dst = complex_pdb.with_file_name(name);
@@ -330,6 +396,7 @@ fn split_chain(complex_pdb: &Path, chain: char, name: &str) -> Result<PathBuf, A
 
 fn predict_structure(
     predict: &PredictArgs,
+    out_dir: &Path,
     heavy: &str,
     light: &str,
 ) -> Result<PathBuf, AbfvError> {
@@ -342,7 +409,7 @@ fn predict_structure(
         .arg("--checkpoint")
         .arg(&predict.checkpoint)
         .arg("--out-dir")
-        .arg(&predict.out_dir)
+        .arg(out_dir)
         .arg("--out-file")
         .arg(&predict.out_file)
         .status()?;
@@ -355,7 +422,7 @@ fn predict_structure(
         });
     }
 
-    Ok(predict.out_dir.join(&predict.out_file))
+    Ok(out_dir.join(&predict.out_file))
 }
 
 fn init_tracing(filter: &str) {
