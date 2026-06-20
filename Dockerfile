@@ -1,8 +1,5 @@
 # syntax=docker/dockerfile:1
 
-# Pinned onnxruntime version (keep in sync with vendored/fetch-onnxruntime.sh).
-ARG ORT_VERSION=1.24.2
-
 # ---- Stage A: build the abfv Rust binary ----
 # Pinned to 1.91.1 to match rust-toolchain.toml (keep the two in sync). The
 # floor is 1.88, required by `ort` 2.0.0-rc.12 (ONNX inference). ort uses
@@ -18,14 +15,20 @@ COPY src ./src
 RUN touch src/main.rs && cargo build --release
 
 # ---- Stage A2: fetch the onnxruntime shared lib (stock Microsoft prebuilt,
-#      not vendored in git — see vendored/fetch-onnxruntime.sh) ----
+#      not vendored in git) using the SAME script as local dev, so the version,
+#      URL and sha256 have a single source of truth: vendored/fetch-onnxruntime.sh.
+#      Resolve the symlink chain to a stable filename for the runtime COPY.
 FROM debian:bookworm-slim AS ort-fetch
-ARG ORT_VERSION
 RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates \
- && curl -fsSL "https://github.com/microsoft/onnxruntime/releases/download/v${ORT_VERSION}/onnxruntime-linux-x64-${ORT_VERSION}.tgz" \
-      -o /tmp/ort.tgz \
- && mkdir -p /opt/ort && tar xzf /tmp/ort.tgz -C /opt/ort --strip-components=1 \
- && rm /tmp/ort.tgz
+ && rm -rf /var/lib/apt/lists/*
+COPY vendored/fetch-onnxruntime.sh /tmp/fetch-onnxruntime.sh
+# Empty build-args -> the script's pinned defaults apply (override version AND
+# sha256 together to bump): docker build --build-arg ORT_VERSION=... --build-arg ORT_SHA256=...
+ARG ORT_VERSION=
+ARG ORT_SHA256=
+RUN ORT_VERSION="${ORT_VERSION}" ORT_SHA256="${ORT_SHA256}" ORT_DIR=/opt/ort \
+      bash /tmp/fetch-onnxruntime.sh \
+ && cp "$(readlink -f /opt/ort/lib/libonnxruntime.so)" /opt/libonnxruntime.so
 
 # ---- Stage B: minimal runtime ----
 # Structure prediction now runs in-process via ONNX (ort), so the runtime no
@@ -37,7 +40,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certifi
 # (workers/predict.py is copied for reference but is NOT executed here — its
 # torch/abb3 imports are intentionally absent from this image.)
 FROM python:3.12-slim-bookworm AS runtime
-ARG ORT_VERSION
 
 # Runtime shared libs: libgomp1 for onnxruntime's OpenMP, libstdc++6 for
 # freesasa + onnxruntime.
@@ -51,7 +53,7 @@ RUN pip install --no-cache-dir matplotlib pandas
 # abfv binary from rust-builder; libonnxruntime from the fetch stage; the model
 # + freesasa are vendored prebuilts copied from the build context.
 COPY --from=rust-builder /build/target/release/abfv /opt/abfv/bin/abfv
-COPY --from=ort-fetch /opt/ort/lib/libonnxruntime.so.${ORT_VERSION} /opt/abfv/lib/libonnxruntime.so
+COPY --from=ort-fetch /opt/libonnxruntime.so /opt/abfv/lib/libonnxruntime.so
 COPY vendored/freesasa  /opt/abfv/bin/freesasa
 COPY vendored/abb3.onnx /opt/abfv/model/abb3.onnx
 COPY workers/  /opt/abfv/workers/
