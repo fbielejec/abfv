@@ -1,0 +1,23 @@
+#+TITLE: notebooks/
+
+Notebooks for the abfv pipeline, run via =org-babel-jupyter= (emacs-jupyter).
+
+* Kernel setup (required before running mvp.org)
+
+The src blocks use =:kernel abfv=, a Jupyter kernel backed by the ABodyBuilder3
+venv at =/home/filip/CloudStation/Python/abodybuilder3/.venv= (Python 3.9.19,
+where =abodybuilder3= is importable). The kernelspec is *not* in the repo - it
+lives under =~/.local/share/jupyter/kernels/abfv=. Register it once:
+
+#+BEGIN_SRC sh
+/home/filip/CloudStation/Python/abodybuilder3/.venv/bin/python \
+    -m ipykernel install --user \
+    --name abfv \
+    --display-name "Python (abfv / abodybuilder3 venv)"
+#+END_SRC
+
+Verify:
+
+#+BEGIN_SRC sh
+jupyter kernelspec list          # should list `abfv`
+#+END_SRC

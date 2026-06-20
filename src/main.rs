@@ -25,6 +25,7 @@ const DEFAULT_FORMAT: &str = "rsa";
 const DEFAULT_OUT_CSV: &str = "contacts.csv";
 const DEFAULT_VISUALIZE: &str = "workers/visualize.py";
 const DEFAULT_PLOT_FILE: &str = "dsasa_barplot.png";
+const CONTACT_METRIC: &str = "contact_metric_abs";
 
 #[derive(Parser, Debug)]
 #[command(name = "abfv")]
@@ -177,6 +178,10 @@ struct VisualizeArgs {
     /// Output PNG file name (written under the top-level `--out-dir`).
     #[arg(long, value_name = "FILE", default_value = DEFAULT_PLOT_FILE)]
     out_file: String,
+
+    /// Contact metric (column name in the input csv file)
+    #[arg(long, value_name = "CONTACT_METRIC", default_value = CONTACT_METRIC)]
+    contact_metric: String,
 }
 
 impl Default for VisualizeArgs {
@@ -185,6 +190,7 @@ impl Default for VisualizeArgs {
             python: env_or("ABFV_PYTHON", DEFAULT_PYTHON),
             script: env_or("ABFV_VISUALIZE", DEFAULT_VISUALIZE),
             out_file: DEFAULT_PLOT_FILE.into(),
+            contact_metric: CONTACT_METRIC.into(),
         }
     }
 }
@@ -390,16 +396,12 @@ fn delta_sasa(
     let mut contacts: Vec<ContactRow> = vec![];
 
     for (key @ (chain, residue_name, residue_number), complex_residue) in &complex {
-        // println!("complex residue: {complex_residue:?}");
-        // println!("iso residue: {iso_residue:?}");
-
         let iso_residue = isolated.get(key).ok_or(AbfvError::Data {
             why: format!("isolated map does not contain residue: {:?}", key),
         })?;
 
         let delta = iso_residue.side_chain_absolute - complex_residue.side_chain_absolute;
 
-        // first
         let contact_metric = if delta > 0.0 {
             delta / iso_residue.side_chain_absolute
         } else {
@@ -553,6 +555,8 @@ fn run_visualize(
     let status = Command::new(&args.python)
         .arg(&args.script)
         .arg(contacts_csv)
+        .arg("--metric")
+        .arg(&args.contact_metric)
         .arg("--threshold")
         .arg(threshold.to_string())
         .arg("--out-dir")
@@ -573,8 +577,8 @@ fn run_visualize(
 }
 
 fn write_csv(path: &Path, rows: &[ContactRow]) -> Result<(), AbfvError> {
-    let mut out = String::from(
-        "chain,residue_number,residue_name,iso_side_chain_absolute,complex_side_chain_absolute,contact_metric,is_contact\n",
+    let mut out = format!(
+        "chain,residue_number,residue_name,iso_side_chain_absolute,complex_side_chain_absolute,{CONTACT_METRIC},is_contact\n"
     );
 
     for r in rows {
