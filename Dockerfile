@@ -1,10 +1,14 @@
 # syntax=docker/dockerfile:1
 
+# Pinned onnxruntime version (keep in sync with vendored/fetch-onnxruntime.sh).
+ARG ORT_VERSION=1.24.2
+
 # ---- Stage A: build the abfv Rust binary ----
-# Pinned to 1.85.1 to match rust-toolchain.toml (keep the two in sync). 1.85 is
-# the floor because Cargo.lock resolves clap 4.6.1, whose own manifest declares
-# `edition = "2024"`, which Cargo < 1.85 cannot parse.
-FROM rust:1.85.1-slim-bookworm AS rust-builder
+# Pinned to 1.91.1 to match rust-toolchain.toml (keep the two in sync). The
+# floor is 1.88, required by `ort` 2.0.0-rc.12 (ONNX inference). ort uses
+# `load-dynamic`, so libonnxruntime is NOT needed at build time — it is
+# dlopen'd at runtime from ABFV_ORT_DYLIB (see the runtime stage).
+FROM rust:1.91.1-slim-bookworm AS rust-builder
 WORKDIR /build
 # Cache deps: copy manifests first (rust-toolchain.toml so the pin is honored)
 COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
@@ -13,102 +17,70 @@ RUN mkdir src && echo 'fn main() {}' > src/main.rs && cargo build --release || t
 COPY src ./src
 RUN touch src/main.rs && cargo build --release
 
-# FreeSASA is a prebuilt 2.1.3 binary that lives in `vendored/`
-# (compiled with `--disable-json  --disable-xml`,
-# so it is ABI-compatible with the runtime stage and needs only
-# libstdc++/libm/libc). It is COPY'd straight into the runtime stage below.
+# ---- Stage A2: fetch the onnxruntime shared lib (stock Microsoft prebuilt,
+#      not vendored in git — see vendored/fetch-onnxruntime.sh) ----
+FROM debian:bookworm-slim AS ort-fetch
+ARG ORT_VERSION
+RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates \
+ && curl -fsSL "https://github.com/microsoft/onnxruntime/releases/download/v${ORT_VERSION}/onnxruntime-linux-x64-${ORT_VERSION}.tgz" \
+      -o /tmp/ort.tgz \
+ && mkdir -p /opt/ort && tar xzf /tmp/ort.tgz -C /opt/ort --strip-components=1 \
+ && rm /tmp/ort.tgz
 
-# ---- Stage B: build + slim the conda env (heavy; discarded, only the env dir
-#      and the checkpoint are copied forward) ----
-FROM mambaorg/micromamba:1.5-bookworm AS env-builder
-ARG ABB3_COMMIT=18e4058015a39c5405c08a0d5629cf302627b253
-USER root
+# ---- Stage B: minimal runtime ----
+# Structure prediction now runs in-process via ONNX (ort), so the runtime no
+# longer carries the torch/openmm/abodybuilder3 conda stack — only a light
+# Python is kept for the matplotlib `visualize` step. The vendored prebuilts:
+#   * freesasa     2.1.3, built --disable-json --disable-xml (libstdc++/libm/libc only)
+#   * abb3.onnx    ABodyBuilder3 exported to ONNX (workers/export_onnx.py)
+#   * libonnxruntime.so  Microsoft's 1.24 manylinux build (glibc >= 2.28, ok on bookworm)
+# (workers/predict.py is copied for reference but is NOT executed here — its
+# torch/abb3 imports are intentionally absent from this image.)
+FROM python:3.12-slim-bookworm AS runtime
+ARG ORT_VERSION
+
+# Runtime shared libs: libgomp1 for onnxruntime's OpenMP, libstdc++6 for
+# freesasa + onnxruntime.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      git curl ca-certificates \
+      libgomp1 libstdc++6 \
  && rm -rf /var/lib/apt/lists/*
 
-# Create the conda env (cached until the yml changes)
-COPY docker/environment.docker.yml /tmp/environment.docker.yml
-RUN micromamba create -y -f /tmp/environment.docker.yml && micromamba clean -a -y
-ENV PATH=/opt/conda/envs/abfv/bin:$PATH
+# Only the visualize step needs Python deps.
+RUN pip install --no-cache-dir matplotlib pandas
 
-# ABodyBuilder3 + minimal runtime deps (NOT abb3's heavy install_requires).
-# A pip constraints file pins the conda-provided scientific stack so that no
-# transitive dependency may upgrade/uninstall it. Without this:
-#   - "lightning>=2.0.4" resolves to lightning 2.6 -> drags torch 2.8 + the full
-#     nvidia CUDA wheel set, uninstalling the conda cpuonly torch 2.0.1, and
-#   - pandas/matplotlib pull numpy 2.0.2, uninstalling conda numpy 1.21.6 and
-#     breaking scipy/torchmetrics (compiled against numpy 1.x).
-# lightning/torchmetrics versions are ABB3's own upstream pins
-# (pinned-versions.txt at the build commit), validated against torch 2.0/2.1.
-ENV SETUPTOOLS_SCM_PRETEND_VERSION=1.0.0
-RUN printf 'numpy==1.21.6\ntorch==2.0.1\nscipy==1.11.2\n' > /tmp/constraints.txt \
- && pip install --no-cache-dir -c /tmp/constraints.txt \
-      "lightning==2.1.2" "lightning-utilities==0.10.0" "torchmetrics==1.2.1" \
-      biopython einops dm-tree ml_collections loguru python-box tqdm \
- && pip install --no-cache-dir --no-deps \
-      "git+https://github.com/Exscientia/abodybuilder3@${ABB3_COMMIT}" \
- && pip install --no-cache-dir -c /tmp/constraints.txt "pandas==1.5.3" matplotlib
-
-# Slim the env (~4.0 GB -> ~1.7 GB). The CUDA libs are pulled in by conda-forge's
-# openmm (its GPU platform plugin) but are dead weight here: torch is the CPU
-# build and never links them, and we only ever IMPORT openmm (the refinement /
-# simulation path is never executed). Headers + static libs are build-only.
-# This runs in a separate layer from `micromamba create`, which is fine because
-# the final stage COPY --from picks up only the post-slim directory state.
-RUN rm -f  /opt/conda/envs/abfv/lib/libcu*.so* \
-           /opt/conda/envs/abfv/lib/libnpp*.so* \
-           /opt/conda/envs/abfv/lib/libnv*.so* \
- && rm -rf /opt/conda/envs/abfv/include \
- && find /opt/conda/envs/abfv -name '__pycache__' -type d -prune -exec rm -rf {} + \
- && find /opt/conda/envs/abfv -name '*.a' -delete
-
-# Import smoke test on the SLIMMED env (TDD driver for the dep set; also proves
-# the CUDA-lib removal did not break openmm/torch imports)
-RUN python -c "import torch, openmm, pdbfixer; \
-import abodybuilder3; \
-from abodybuilder3.utils import string_to_input, output_to_pdb, add_atom37_to_output; \
-from abodybuilder3.lightning_module import LitABB3; \
-import pandas, matplotlib; \
-print('imports OK')"
-
-# The model checkpoint lives in `vendored/best_second_stage.ckpt`
-# and is COPY'd straight into the runtime stage below.
-
-# ---- Stage C: minimal runtime ----
-# Fresh micromamba base (no apt/pip build layers); we COPY in just the slimmed
-# conda env, the checkpoint, the two binaries, and the workers/examples.
-FROM mambaorg/micromamba:1.5-bookworm AS runtime
-USER root
-
-# Slimmed conda env (final directory state from env-builder)
-COPY --from=env-builder /opt/conda/envs/abfv /opt/conda/envs/abfv
-
-# abfv binary from the rust-builder stage; freesasa + checkpoint from the
-# vendored prebuilts; plus workers + examples
+# abfv binary from rust-builder; libonnxruntime from the fetch stage; the model
+# + freesasa are vendored prebuilts copied from the build context.
 COPY --from=rust-builder /build/target/release/abfv /opt/abfv/bin/abfv
-COPY vendored/freesasa                /opt/abfv/bin/freesasa
-COPY vendored/best_second_stage.ckpt  /opt/abfv/model/best_second_stage.ckpt
+COPY --from=ort-fetch /opt/ort/lib/libonnxruntime.so.${ORT_VERSION} /opt/abfv/lib/libonnxruntime.so
+COPY vendored/freesasa  /opt/abfv/bin/freesasa
+COPY vendored/abb3.onnx /opt/abfv/model/abb3.onnx
 COPY workers/  /opt/abfv/workers/
 COPY examples/ /opt/abfv/examples/
 
-ENV PATH=/opt/conda/envs/abfv/bin:$PATH
-# Container paths for the abfv CLI (clap reads these ABFV_* env vars)
-ENV ABFV_PYTHON=/opt/conda/envs/abfv/bin/python \
-    ABFV_SCRIPT=/opt/abfv/workers/predict.py \
+# Container paths for the abfv CLI (clap reads these ABFV_* env vars).
+ENV ABFV_ONNX=/opt/abfv/model/abb3.onnx \
+    ABFV_ORT_DYLIB=/opt/abfv/lib/libonnxruntime.so \
+    ABFV_PYTHON=/usr/local/bin/python \
     ABFV_VISUALIZE=/opt/abfv/workers/visualize.py \
-    ABFV_CHECKPOINT=/opt/abfv/model/best_second_stage.ckpt \
     ABFV_FREESASA=/opt/abfv/bin/freesasa
 
-# Fail the build if any baked artifact is missing, the copied env still imports,
-# and the freesasa binary runs in this clean base (links resolve).
+# Fail the build if any baked artifact is missing, freesasa links in this clean
+# base, the visualize deps import, and the whole pipeline runs end-to-end
+# (proves load-dynamic resolves libonnxruntime, the ONNX model runs, and the
+# Rust -> freesasa -> contacts -> matplotlib chain works).
 RUN test -x /opt/abfv/bin/abfv \
  && test -x /opt/abfv/bin/freesasa \
- && test -f /opt/abfv/model/best_second_stage.ckpt \
- && test -f /opt/abfv/workers/predict.py \
- && test -f /opt/abfv/workers/visualize.py \
+ && test -f /opt/abfv/model/abb3.onnx \
+ && test -f /opt/abfv/lib/libonnxruntime.so \
  && /opt/abfv/bin/freesasa --version \
- && python -c "import torch, openmm, pdbfixer; from abodybuilder3.lightning_module import LitABB3; print('runtime imports OK')"
+ && python -c "import matplotlib, pandas; print('visualize deps OK')" \
+ && mkdir -p /tmp/smoke \
+ && /opt/abfv/bin/abfv --out-dir /tmp/smoke \
+      --heavy-file /opt/abfv/examples/heavy.fasta \
+      --light-file /opt/abfv/examples/light.fasta \
+ && test -s /tmp/smoke/contacts.csv \
+ && rm -rf /tmp/smoke \
+ && echo "pipeline smoke test OK"
 
 WORKDIR /work
 ENTRYPOINT ["/opt/abfv/bin/abfv"]

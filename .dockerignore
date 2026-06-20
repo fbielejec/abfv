@@ -7,3 +7,6 @@ mvp.ipynb
 __pycache__/
 *.pyc
 .env
+
+# onnxruntime lib is fetched in-build (ort-fetch stage), not from context
+vendored/onnxruntime/

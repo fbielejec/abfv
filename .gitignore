@@ -10,3 +10,5 @@ out/
 # Python
 __pycache__/
 *.pyc
+# Fetched on demand (see vendored/fetch-onnxruntime.sh); not committed.
+vendored/onnxruntime/
