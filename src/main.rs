@@ -55,8 +55,8 @@ struct Args {
     #[arg(long, value_name = "PATH", conflicts_with = "light")]
     light_file: Option<PathBuf>,
 
-    /// Contact threshold (percent for `first`, percentage points for `second`).
-    #[arg(long, default_value_t = 0.1)]
+    /// Contact threshold (lives in [0.0 - 1.0])
+    #[arg(long, default_value_t = 0.1, value_parser = parse_unit_interval, allow_hyphen_values = true)]
     threshold: f64,
 
     /// Allow `X` (unknown) residues. Off by default.
@@ -434,12 +434,11 @@ fn parse_rsa(rsa: &Path) -> Result<HashMap<ResidueKey, ResidueSasa>, AbfvError> 
         .enumerate()
         .filter(|(_, l)| l.starts_with("RES "))
         .map(|(i, l)| {
-            let line_no = i + 1;
             let cols: Vec<&str> = l.split_whitespace().collect();
 
             if cols.len() < 8 {
                 return Err(err(
-                    line_no,
+                    i,
                     format!("expected at least 8 columns, found {}: {l:?}", cols.len()),
                 ));
             }
@@ -449,15 +448,15 @@ fn parse_rsa(rsa: &Path) -> Result<HashMap<ResidueKey, ResidueSasa>, AbfvError> 
             let chain = cols[2]
                 .chars()
                 .next()
-                .ok_or_else(|| err(line_no, format!("empty chain id (column 3) in {l:?}")))?;
+                .ok_or_else(|| err(i, format!("empty chain id (column 3) in {l:?}")))?;
 
             let residue_number = cols[3]
                 .parse::<u32>()
-                .map_err(|e| err(line_no, format!("residue number '{}': {e}", cols[3])))?;
+                .map_err(|e| err(i, format!("residue number '{}': {e}", cols[3])))?;
 
             let side_chain_absolute = cols[6]
                 .parse::<f64>()
-                .map_err(|e| err(line_no, format!("side-chain ABS '{}': {e}", cols[6])))?;
+                .map_err(|e| err(i, format!("side-chain ABS '{}': {e}", cols[6])))?;
 
             let key = (chain, residue_name.clone(), residue_number);
 
@@ -603,6 +602,19 @@ fn init_tracing(filter: &str) {
         .with(filter)
         .with(tracing_subscriber::fmt::layer().with_target(true))
         .init();
+}
+
+/// Parse a CLI float and require it to be a fraction in the closed unit interval.
+fn parse_unit_interval(s: &str) -> Result<f64, String> {
+    let v: f64 = s
+        .parse()
+        .map_err(|_| format!("`{s}` is not a valid number"))?;
+
+    if (0.0..=1.0).contains(&v) {
+        Ok(v)
+    } else {
+        Err(format!("must be in [0.0, 1.0], got {v}"))
+    }
 }
 
 /// Read an env var, falling back to a compile-time default.
