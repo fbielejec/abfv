@@ -1,0 +1,323 @@
+#+TITLE: abfv (antibody fragment variable) MVP pipeline
+#+AUTHOR: filip
+#+OPTIONS: toc:2 num:t
+
+* Pipeline overview
+
+- *Step 1:* generate the Fv 3D structure with ABodyBuilder3 -> ~out/complex.pdb~.
+- *Step 2* isolate chains
+- *Step 3:* run FreeSASA on the complex and each isolated chain => returns per-residue side-chain SASA.
+- *STEP 4*: Compute the ΔSASA = isolated - complex / isolated and apply the >= 10% threshold (aka contact definition)
+- *STEP 5*: visualize
+
+* Setup
+** Imports
+
+#+BEGIN_SRC jupyter-python :session abfv :kernel abfv :async yes :exports both
+import pandas as pd
+import os
+import torch
+from abodybuilder3.utils import string_to_input, output_to_pdb, add_atom37_to_output
+from abodybuilder3.lightning_module import LitABB3
+import math
+import subprocess
+import pprint
+import matplotlib.pyplot as plt
+#+END_SRC
+
+#+RESULTS:
+
+** Constants
+
+#+BEGIN_SRC jupyter-python :session abfv :kernel abfv :async yes :exports both
+# const
+CKPT = "/home/filip/CloudStation/Python/abodybuilder3/output/plddt-loss/best_second_stage.ckpt"
+OUT_DIR = "/home/filip/CloudStation/Python/abfv/out"
+FREESASA = "/home/filip/CloudStation/Python/freesasa/src/freesasa"
+CHAIN_COLUMN = 21 # in PDB files
+CONTACT_THRESHOLD = 0.1 # 10%
+
+os.makedirs(OUT_DIR, exist_ok=True)
+
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+print("device:", device)
+#+END_SRC
+
+#+RESULTS:
+: device: cuda
+
+** Input sequences
+
+#+BEGIN_SRC jupyter-python :session abfv :kernel abfv :async yes :exports both
+# Antibody Fv input sequences (heavy = VH, light = VL)
+
+heavy = "EVQLVESGGGLVQPGGSLRLSCAASGYTFTNYGMNWVRQAPGKGLEWVGWINTYTGEPTYAADFKRRFTFSLDTSKSTAYLQMNSLRAEDTAVYYCAKYPHYYGSSHWYFDVWGQGTLVTVSS"
+light = "DIQMTQSPSSLSASVGDRVTITCSASQDISNYLNWYQQKPGKAPKVLIYFTSSLHSGVPSRFSGSGSGTDFTLTISSLQPEDFATYYCQQYSTVPWTFGQGTKVEIK"
+
+print(f"VH (heavy): {len(heavy)} residues")
+print(f"VL (light): {len(light)} residues")
+#+END_SRC
+
+#+RESULTS:
+: VH (heavy): 123 residues
+: VL (light): 107 residues
+
+* STEP 1 — generate the Fv 3D structure
+
+#+BEGIN_SRC jupyter-python :session abfv :kernel abfv :async yes :exports both
+# STEP 1
+
+module = LitABB3.load_from_checkpoint(CKPT, map_location=device)
+model = module.model.to(device).eval()
+
+print("ABodyBuilder3 model loaded")
+
+ab_input = string_to_input(heavy=heavy, light=light)
+
+# https://github.com/Exscientia/abodybuilder3/blob/main/notebooks/example.ipynb
+# [L, ...] -> [[L, ...]] batch of one
+batch = {k: (v.unsqueeze(0).to(device) if k not in ["single", "pair"] else v.to(device))
+         for k,v in ab_input.items()}
+
+# no backprop, do not keep track of the gradients
+with torch.no_grad():
+    output = model(batch, batch["aatype"])
+
+# atom14 representation into the atom37 (appended to dict)
+output = add_atom37_to_output(output, aatype=ab_input["aatype"].to(device))
+
+complex_pdb_path = os.path.join(OUT_DIR, "complex.pdb")
+with open(complex_pdb_path, "w") as fw:
+    fw.write(output_to_pdb(output, ab_input))
+
+print(f"wrote {complex_pdb_path}")
+#+END_SRC
+
+#+RESULTS:
+: ABodyBuilder3 model loaded
+: wrote /home/filip/CloudStation/Python/abfv/out/complex.pdb
+
+* STEP 2 — isolate chains
+
+#+BEGIN_SRC jupyter-python :session abfv :kernel abfv :async yes :exports both
+# STEP 2
+
+def split_chain(src_pdb_path, chain, dst_pdb_path):
+    with open(src_pdb_path) as fr:
+        lines = fr.readlines()
+
+    kept = [line for line in lines if line.startswith(("ATOM", "HETATM", "TER")) and len(line) > CHAIN_COLUMN and line[CHAIN_COLUMN] == chain]
+
+    with open(dst_pdb_path, "w") as fw:
+        fw.writelines(kept)
+        fw.write("END\n")
+
+    return dst_pdb_path
+
+heavy_pdb_path = split_chain(complex_pdb_path, "H", os.path.join(OUT_DIR, "heavy.pdb"))
+light_pdb_path = split_chain(complex_pdb_path, "L", os.path.join(OUT_DIR, "light.pdb"))
+
+print(f"wrote {heavy_pdb_path} and {light_pdb_path}")
+#+END_SRC
+
+#+RESULTS:
+: wrote /home/filip/CloudStation/Python/abfv/out/heavy.pdb and /home/filip/CloudStation/Python/abfv/out/light.pdb
+
+* STEP 3 — run FreeSASA
+
+#+BEGIN_SRC jupyter-python :session abfv :kernel abfv :async yes :exports both
+# STEP 3
+
+def run_freesasa(pdb):
+    proc = subprocess.run([FREESASA, "--format=rsa", pdb],
+                         capture_output=True, text = True, check = True)
+    return proc.stdout
+
+def parse_rsa(rsa_text):
+    """return {(chain, number, name) :  value}"""
+    residues = {}
+    for line in rsa_text.splitlines():
+        if not line.startswith("RES"):
+            continue
+        cols = line.split()
+
+        residue_name, chain, residue_number = cols[1],cols[2], int(cols[3])
+
+        side_chain_absolute = float(cols[6])
+        side_chain_relative = float(cols[7]) if cols[7] not in ("N/A", "-") else math.nan
+
+        residues[(chain, residue_name, residue_number)] = {"side_chain_absolute": side_chain_absolute, "side_chain_relative": side_chain_relative}
+    return residues
+
+
+complex_rsa = parse_rsa(run_freesasa(complex_pdb_path))
+print(list(complex_rsa.items())[0:2])
+
+heavy_rsa = parse_rsa(run_freesasa(heavy_pdb_path))
+print(list(heavy_rsa.items())[0:2])
+
+light_rsa = parse_rsa(run_freesasa(light_pdb_path))
+
+print(list(light_rsa.items())[0:2])
+#+END_SRC
+
+#+RESULTS:
+: [(('H', 'GLU', 0), {'side_chain_absolute': 123.1, 'side_chain_relative': 93.1}), (('H', 'VAL', 1), {'side_chain_absolute': 50.22, 'side_chain_relative': 45.5})]
+: [(('H', 'GLU', 0), {'side_chain_absolute': 123.1, 'side_chain_relative': 93.1}), (('H', 'VAL', 1), {'side_chain_absolute': 50.22, 'side_chain_relative': 45.5})]
+: [(('L', 'ASP', 123), {'side_chain_absolute': 74.12, 'side_chain_relative': 73.8}), (('L', 'ILE', 124), {'side_chain_absolute': 4.84, 'side_chain_relative': 3.6})]
+
+* STEP 4 — ΔSASA + contacts
+
+#+BEGIN_SRC jupyter-python :session abfv :kernel abfv :async yes :exports both
+# STEP 4
+
+# merge dicts
+isolated_rsa = {**heavy_rsa, **light_rsa}
+
+contacts = []
+
+# (iso_ABS - complex_ABS) / iso_ABS
+# or
+# iso_REL - complex_REL
+
+for key in complex_rsa.keys():
+    chain, residue_name, residue_number = key
+    delta_abs = isolated_rsa[key]["side_chain_absolute"] - complex_rsa[key]["side_chain_absolute"]
+    delta_rel = isolated_rsa[key]["side_chain_relative"] - complex_rsa[key]["side_chain_relative"]
+
+    # delta <= 0 => no burial => not a contact. Mark both metrics NaN (not 0) to mirror the
+    # Rust pipeline's convention. delta_rel > 0 iff delta_abs > 0 (same per-type reference),
+    # so one flag gates both; it also guards the metric_abs division when iso_abs == 0.
+    buried = delta_abs > 0
+    metric_abs = delta_abs / isolated_rsa[key]["side_chain_absolute"] if buried else math.nan
+    metric_rel = delta_rel / 100 if buried else math.nan
+
+    contacts.append(dict(
+        chain = chain,
+        residue_number = residue_number,
+        residue_name = residue_name,
+        side_chain_absolute_iso = isolated_rsa[key]["side_chain_absolute"],
+        side_chain_relative_iso = isolated_rsa[key]["side_chain_relative"],
+        side_chain_absolute_complex = complex_rsa[key]["side_chain_absolute"],
+        side_chain_relative_complex = complex_rsa[key]["side_chain_relative"],
+        metric_abs = metric_abs,
+        metric_rel = metric_rel
+    ))
+
+pprint.pp(contacts[0:2])
+
+df = pd.DataFrame(contacts).sort_values(["chain", "residue_number"]).reset_index(drop = True)
+df["is_contact_rel"] = df["metric_rel"] >= CONTACT_THRESHOLD
+df["is_contact_abs"] = df["metric_abs"] >= CONTACT_THRESHOLD
+#df
+
+#pprint.pp(df)
+#+END_SRC
+
+#+RESULTS:
+#+begin_example
+  [{'chain': 'H',
+    'residue_number': 0,
+    'residue_name': 'GLU',
+    'side_chain_absolute_iso': 123.1,
+    'side_chain_relative_iso': 93.1,
+    'side_chain_absolute_complex': 123.1,
+    'side_chain_relative_complex': 93.1,
+    'metric_abs': nan,
+    'metric_rel': nan},
+   {'chain': 'H',
+    'residue_number': 1,
+    'residue_name': 'VAL',
+    'side_chain_absolute_iso': 50.22,
+    'side_chain_relative_iso': 45.5,
+    'side_chain_absolute_complex': 50.22,
+    'side_chain_relative_complex': 45.5,
+    'metric_abs': nan,
+    'metric_rel': nan}]
+      chain  residue_number residue_name  side_chain_absolute_iso  \
+  0       H               0          GLU                   123.10   
+  1       H               1          VAL                    50.22   
+  2       H               2          GLN                    76.19   
+  3       H               3          LEU                     0.00   
+  4       H               4          VAL                    72.68   
+  ..    ...             ...          ...                      ...   
+  225     L             225          LYS                    96.44   
+  226     L             226          VAL                     0.00   
+  227     L             227          GLU                    82.37   
+  228     L             228          ILE                    26.18   
+  229     L             229          LYS                   125.98   
+
+       side_chain_relative_iso  side_chain_absolute_complex  \
+  0                       93.1                       123.10   
+  1                       45.5                        50.22   
+  2                       55.7                        76.19   
+  3                        0.0                         0.00   
+  4                       65.8                        72.68   
+  ..                       ...                          ...   
+  225                     59.2                        96.44   
+  226                      0.0                         0.00   
+  227                     62.3                        82.37   
+  228                     19.5                        26.18   
+  229                     77.3                       125.98   
+
+       side_chain_relative_complex  metric_abs  metric_rel  is_contact_rel  \
+  0                           93.1         NaN         NaN           False   
+  1                           45.5         NaN         NaN           False   
+  2                           55.7         NaN         NaN           False   
+  3                            0.0         NaN         NaN           False   
+  4                           65.8         NaN         NaN           False   
+  ..                           ...         ...         ...             ...   
+  225                         59.2         NaN         NaN           False   
+  226                          0.0         NaN         NaN           False   
+  227                         62.3         NaN         NaN           False   
+  228                         19.5         NaN         NaN           False   
+  229                         77.3         NaN         NaN           False   
+
+       is_contact_abs  
+  0             False  
+  1             False  
+  2             False  
+  3             False  
+  4             False  
+  ..              ...  
+  225           False  
+  226           False  
+  227           False  
+  228           False  
+  229           False  
+
+  [230 rows x 11 columns]
+#+end_example
+
+* STEP 5 — visualize
+
+#+BEGIN_SRC jupyter-python :session abfv :kernel abfv :async yes :exports both
+# STEP 5
+
+def visualize(df, metric):
+    figure, axes = plt.subplots(2, 1, figsize=(13, 6), constrained_layout=True)
+
+    for axis, chain in zip(axes, ["H", "L"]):
+        sub_df = df[df.chain == chain]
+        colors = ["#ff6347" if c else "#4787ff" for c in sub_df[metric] > CONTACT_THRESHOLD]
+
+        axis.bar(sub_df["residue_number"], sub_df[metric].fillna(0),
+           color=colors, width=0.9)
+
+        axis.axhline(CONTACT_THRESHOLD, color="black", ls="--", lw=1)
+        axis.set_title(f"{chain} chain")
+        axis.set_ylabel("Δ side-chain SASA")
+        axis.set_xlabel("residue #")
+        axis.margins(x=0.01)
+
+    figure.suptitle(f"{metric.upper()} (threshold {CONTACT_THRESHOLD*100:.0f}%)")
+
+visualize(df, "metric_rel")
+visualize(df, "metric_abs")
+#+END_SRC
+
+#+RESULTS:
+:RESULTS:
+[[file:./.ob-jupyter/0e6df96d5ffd283267420c760643fd9c2d4693b8.png]]
+[[file:./.ob-jupyter/22d56d98a8efb547b7ac66b307c51477c7172ddf.png]]
+:END:

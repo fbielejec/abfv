@@ -32,6 +32,7 @@ const DEFAULT_FORMAT: &str = "rsa";
 const DEFAULT_OUT_CSV: &str = "contacts.csv";
 const DEFAULT_VISUALIZE: &str = "workers/visualize.py";
 const DEFAULT_PLOT_FILE: &str = "dsasa_barplot.png";
+const CONTACT_METRIC: &str = "contact_metric_abs";
 
 #[derive(Parser, Debug)]
 #[command(name = "abfv")]
@@ -62,8 +63,8 @@ struct Args {
     #[arg(long, value_name = "PATH", conflicts_with = "light")]
     light_file: Option<PathBuf>,
 
-    /// Contact threshold (percent for `first`, percentage points for `second`).
-    #[arg(long, default_value_t = 0.1)]
+    /// Contact threshold (lives in [0.0 - 1.0])
+    #[arg(long, default_value_t = 0.1, value_parser = parse_unit_interval, allow_hyphen_values = true)]
     threshold: f64,
 
     /// Allow `X` (unknown) residues. Off by default.
@@ -174,6 +175,10 @@ struct VisualizeArgs {
     /// Output PNG file name (written under the top-level `--out-dir`).
     #[arg(long, value_name = "FILE", default_value = DEFAULT_PLOT_FILE)]
     out_file: String,
+
+    /// Contact metric (column name in the input csv file)
+    #[arg(long, value_name = "CONTACT_METRIC", default_value = CONTACT_METRIC)]
+    contact_metric: String,
 }
 
 impl Default for VisualizeArgs {
@@ -182,6 +187,7 @@ impl Default for VisualizeArgs {
             python: env_or("ABFV_PYTHON", DEFAULT_PYTHON),
             script: env_or("ABFV_VISUALIZE", DEFAULT_VISUALIZE),
             out_file: DEFAULT_PLOT_FILE.into(),
+            contact_metric: CONTACT_METRIC.into(),
         }
     }
 }
@@ -393,16 +399,12 @@ fn delta_sasa(
     let mut contacts: Vec<ContactRow> = vec![];
 
     for (key @ (chain, residue_name, residue_number), complex_residue) in &complex {
-        // println!("complex residue: {complex_residue:?}");
-        // println!("iso residue: {iso_residue:?}");
-
         let iso_residue = isolated.get(key).ok_or(AbfvError::Data {
             why: format!("isolated map does not contain residue: {:?}", key),
         })?;
 
         let delta = iso_residue.side_chain_absolute - complex_residue.side_chain_absolute;
 
-        // first
         let contact_metric = if delta > 0.0 {
             delta / iso_residue.side_chain_absolute
         } else {
@@ -437,12 +439,11 @@ fn parse_rsa(rsa: &Path) -> Result<HashMap<ResidueKey, ResidueSasa>, AbfvError> 
         .enumerate()
         .filter(|(_, l)| l.starts_with("RES "))
         .map(|(i, l)| {
-            let line_no = i + 1;
             let cols: Vec<&str> = l.split_whitespace().collect();
 
             if cols.len() < 8 {
                 return Err(err(
-                    line_no,
+                    i,
                     format!("expected at least 8 columns, found {}: {l:?}", cols.len()),
                 ));
             }
@@ -452,15 +453,15 @@ fn parse_rsa(rsa: &Path) -> Result<HashMap<ResidueKey, ResidueSasa>, AbfvError> 
             let chain = cols[2]
                 .chars()
                 .next()
-                .ok_or_else(|| err(line_no, format!("empty chain id (column 3) in {l:?}")))?;
+                .ok_or_else(|| err(i, format!("empty chain id (column 3) in {l:?}")))?;
 
             let residue_number = cols[3]
                 .parse::<u32>()
-                .map_err(|e| err(line_no, format!("residue number '{}': {e}", cols[3])))?;
+                .map_err(|e| err(i, format!("residue number '{}': {e}", cols[3])))?;
 
             let side_chain_absolute = cols[6]
                 .parse::<f64>()
-                .map_err(|e| err(line_no, format!("side-chain ABS '{}': {e}", cols[6])))?;
+                .map_err(|e| err(i, format!("side-chain ABS '{}': {e}", cols[6])))?;
 
             let key = (chain, residue_name.clone(), residue_number);
 
@@ -550,6 +551,8 @@ fn run_visualize(
     let status = Command::new(&args.python)
         .arg(&args.script)
         .arg(contacts_csv)
+        .arg("--metric")
+        .arg(&args.contact_metric)
         .arg("--threshold")
         .arg(threshold.to_string())
         .arg("--out-dir")
@@ -570,8 +573,8 @@ fn run_visualize(
 }
 
 fn write_csv(path: &Path, rows: &[ContactRow]) -> Result<(), AbfvError> {
-    let mut out = String::from(
-        "chain,residue_number,residue_name,iso_side_chain_absolute,complex_side_chain_absolute,contact_metric,is_contact\n",
+    let mut out = format!(
+        "chain,residue_number,residue_name,iso_side_chain_absolute,complex_side_chain_absolute,{CONTACT_METRIC},is_contact\n"
     );
 
     for r in rows {
@@ -599,6 +602,19 @@ fn init_tracing(filter: &str) {
         .with(filter)
         .with(tracing_subscriber::fmt::layer().with_target(true))
         .init();
+}
+
+/// Parse a CLI float and require it to be a fraction in the closed unit interval.
+fn parse_unit_interval(s: &str) -> Result<f64, String> {
+    let v: f64 = s
+        .parse()
+        .map_err(|_| format!("`{s}` is not a valid number"))?;
+
+    if (0.0..=1.0).contains(&v) {
+        Ok(v)
+    } else {
+        Err(format!("must be in [0.0, 1.0], got {v}"))
+    }
 }
 
 /// Read an env var, falling back to a compile-time default.
