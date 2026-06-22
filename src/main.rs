@@ -25,7 +25,7 @@ const DEFAULT_FORMAT: &str = "rsa";
 const DEFAULT_OUT_CSV: &str = "contacts.csv";
 const DEFAULT_VISUALIZE: &str = "workers/visualize.py";
 const DEFAULT_PLOT_FILE: &str = "dsasa_barplot.png";
-const CONTACT_METRIC: &str = "contact_metric_abs";
+const CONTACT_METRIC: &str = "contact_metric_rel";
 
 #[derive(Parser, Debug)]
 #[command(name = "abfv")]
@@ -225,6 +225,7 @@ pub type ResidueKey = (char, String, u32);
 pub struct ResidueSasa {
     /// ABS Absolute accessibility value
     pub side_chain_absolute: f64,
+    pub side_chain_relative: f64,
 }
 
 struct ContactRow {
@@ -233,6 +234,8 @@ struct ContactRow {
     residue_number: u32,
     iso_side_chain_absolute: f64,
     complex_side_chain_absolute: f64,
+    iso_side_chain_relative: f64,
+    complex_side_chain_relative: f64,
     contact_metric: f64,
     is_contact: bool,
 }
@@ -400,10 +403,11 @@ fn delta_sasa(
             why: format!("isolated map does not contain residue: {:?}", key),
         })?;
 
-        let delta = iso_residue.side_chain_absolute - complex_residue.side_chain_absolute;
-
-        let contact_metric = if delta > 0.0 {
-            delta / iso_residue.side_chain_absolute
+        let delta_abs = iso_residue.side_chain_absolute - complex_residue.side_chain_absolute;
+        let contact_metric = if delta_abs > 0.0 {
+            // relative (% change) metric
+            let delta_rel = iso_residue.side_chain_relative - complex_residue.side_chain_relative;
+            delta_rel / 100.0
         } else {
             f64::NAN
         };
@@ -416,6 +420,8 @@ fn delta_sasa(
             complex_side_chain_absolute: complex_residue.side_chain_absolute,
             contact_metric,
             is_contact: contact_metric >= contact_threshold,
+            iso_side_chain_relative: iso_residue.side_chain_relative,
+            complex_side_chain_relative: complex_residue.side_chain_relative,
         });
     }
 
@@ -460,12 +466,20 @@ fn parse_rsa(rsa: &Path) -> Result<HashMap<ResidueKey, ResidueSasa>, AbfvError> 
                 .parse::<f64>()
                 .map_err(|e| err(i, format!("side-chain ABS '{}': {e}", cols[6])))?;
 
+            let side_chain_relative = match cols[7] {
+                "N/A" | "-" => f64::NAN,
+                other => other
+                    .parse::<f64>()
+                    .map_err(|e| err(i, format!("side-chain REL '{other}': {e}")))?,
+            };
+
             let key = (chain, residue_name.clone(), residue_number);
 
             Ok((
                 key,
                 ResidueSasa {
                     side_chain_absolute,
+                    side_chain_relative,
                 },
             ))
         })
@@ -578,18 +592,20 @@ fn run_visualize(
 
 fn write_csv(path: &Path, rows: &[ContactRow]) -> Result<(), AbfvError> {
     let mut out = format!(
-        "chain,residue_number,residue_name,iso_side_chain_absolute,complex_side_chain_absolute,{CONTACT_METRIC},is_contact\n"
+        "chain,residue_number,residue_name,iso_side_chain_absolute,complex_side_chain_absolute,iso_side_chain_relative,complex_side_chain_relative,{CONTACT_METRIC},is_contact\n"
     );
 
     for r in rows {
         _ = writeln!(
             out,
-            "{},{},{},{:.3},{:.3},{:.3},{}",
+            "{},{},{},{:.3},{:.3},{:.3},{:.3},{:.3},{}",
             r.chain,
             r.residue_number,
             r.residue_name,
             r.iso_side_chain_absolute,
             r.complex_side_chain_absolute,
+            r.iso_side_chain_relative,
+            r.complex_side_chain_relative,
             r.contact_metric,
             r.is_contact,
         );

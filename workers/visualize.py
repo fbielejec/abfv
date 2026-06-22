@@ -46,7 +46,7 @@ def main():
     parser.add_argument(
         "-m",
         "--metric",
-        default="contact_metric_abs",
+        default="contact_metric_rel",
         help="Which contact metric (csv column) to use.",
     )
 
