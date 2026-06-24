@@ -3,6 +3,7 @@ out/
 
 # Local environment config
 .env
+vendored/onnxruntime/
 
 # Rust
 /target

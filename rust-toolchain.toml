@@ -1,9 +1,9 @@
 # Pin the Rust toolchain so local builds match the Docker image exactly.
 # Must stay in sync with the `rust:<version>-slim-bookworm` tag in the Dockerfile.
-# 1.85.x is the floor: Cargo.lock resolves clap 4.6.1, whose own manifest declares
-# `edition = "2024"`, which Cargo < 1.85 cannot even parse.
+# 1.88 is the floor: `ort` 2.0.0-rc.12 (ONNX inference) requires rustc >= 1.88.
+# (clap 4.6.1's edition-2024 manifest needs >= 1.85, subsumed by the above.)
 [toolchain]
-channel = "1.85.1"
+channel = "1.91.1"
 # clippy for `make clippy` on the pinned toolchain. rustfmt is intentionally
 # omitted: `make fmt` uses `cargo +nightly fmt` (rustfmt.toml has nightly-only
 # options), so stable rustfmt is never used here.

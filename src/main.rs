@@ -11,13 +11,20 @@ use thiserror::Error;
 use tracing::{error, info};
 use tracing_subscriber::{EnvFilter, prelude::*};
 
+// ONNX inference path (preprocess -> ort -> pdb), replacing the Python worker.
+mod e2e;
+mod inference;
+mod pdb;
+mod preprocess;
+
 const STANDARD_AA: &str = "ACDEFGHIKLMNPQRSTVWY";
 
 // For host-specific use a local `.env` file (see `.env.example`)
 const DEFAULT_PYTHON: &str = "python3";
-const DEFAULT_SCRIPT: &str = "workers/predict.py";
-const DEFAULT_CHECKPOINT: &str = "vendored/best_second_stage.ckpt";
-const DEFAULT_SEED: u64 = 42;
+// ABodyBuilder3 exported to ONNX (see `workers/export_onnx.py`) + the
+// onnxruntime shared lib we dlopen at runtime (ort `load-dynamic`).
+const DEFAULT_ONNX: &str = "vendored/abb3.onnx";
+const DEFAULT_ORT_DYLIB: &str = "vendored/onnxruntime/lib/libonnxruntime.so";
 const DEFAULT_OUT_DIR: &str = "out";
 const DEFAULT_OUT_FILE: &str = "complex.pdb";
 const DEFAULT_FREESASA: &str = "vendored/freesasa";
@@ -89,21 +96,13 @@ enum PredictCmd {
 
 #[derive(clap::Args, Debug)]
 struct PredictArgs {
-    /// Python interpreter (defaults to the ABodyBuilder3 venv).
-    #[arg(long, env = "ABFV_PYTHON", value_name = "PATH", default_value = DEFAULT_PYTHON)]
-    python: PathBuf,
+    /// ABodyBuilder3 model exported to ONNX.
+    #[arg(long, env = "ABFV_ONNX", value_name = "PATH", default_value = DEFAULT_ONNX)]
+    onnx: PathBuf,
 
-    /// Worker script that wraps the predictor.
-    #[arg(long, env = "ABFV_SCRIPT", value_name = "PATH", default_value = DEFAULT_SCRIPT)]
-    script: PathBuf,
-
-    /// ABodyBuilder3 checkpoint (.ckpt).
-    #[arg(long, env = "ABFV_CHECKPOINT", value_name = "PATH", default_value = DEFAULT_CHECKPOINT)]
-    checkpoint: PathBuf,
-
-    /// RNG seed for the predictor, for reproducible structures.
-    #[arg(long, value_name = "N", default_value_t = DEFAULT_SEED)]
-    seed: u64,
+    /// libonnxruntime shared library (dlopen'd at runtime via ort load-dynamic).
+    #[arg(long, env = "ABFV_ORT_DYLIB", value_name = "PATH", default_value = DEFAULT_ORT_DYLIB)]
+    ort_dylib: PathBuf,
 
     /// Output PDB file name (written under the top-level `--out-dir`).
     #[arg(long, value_name = "FILE", default_value = DEFAULT_OUT_FILE)]
@@ -123,10 +122,8 @@ enum FreesasaCmd {
 impl Default for PredictArgs {
     fn default() -> Self {
         Self {
-            python: env_or("ABFV_PYTHON", DEFAULT_PYTHON),
-            script: env_or("ABFV_SCRIPT", DEFAULT_SCRIPT),
-            checkpoint: env_or("ABFV_CHECKPOINT", DEFAULT_CHECKPOINT),
-            seed: DEFAULT_SEED,
+            onnx: env_or("ABFV_ONNX", DEFAULT_ONNX),
+            ort_dylib: env_or("ABFV_ORT_DYLIB", DEFAULT_ORT_DYLIB),
             out_file: DEFAULT_OUT_FILE.into(),
             freesasa: None,
         }
@@ -215,6 +212,12 @@ enum AbfvError {
 
     #[error("failed to read: {why}")]
     Data { why: String },
+
+    #[error("ONNX inference failed: {0}")]
+    Inference(#[from] inference::InferError),
+
+    #[error("PDB write failed: {0}")]
+    Pdb(#[from] pdb::PdbError),
 }
 
 // composite key - chain (H/L), residue_name (e.g., ASP, ILE), residue_number
@@ -531,31 +534,24 @@ fn predict_structure(
     heavy: &str,
     light: &str,
 ) -> Result<PathBuf, AbfvError> {
-    info!("Predicting Fv structure with ABodyBuilder3");
+    info!(onnx = %predict.onnx.display(), "Predicting Fv structure with ABodyBuilder3 (ONNX)");
 
-    let status = Command::new(&predict.python)
-        .arg(&predict.script)
-        .arg(light)
-        .arg(heavy)
-        .arg("--checkpoint")
-        .arg(&predict.checkpoint)
-        .arg("--seed")
-        .arg(predict.seed.to_string())
-        .arg("--out-dir")
-        .arg(out_dir)
-        .arg("--out-file")
-        .arg(&predict.out_file)
-        .status()?;
-
-    if !status.success() {
-        return Err(AbfvError::Subprocess {
-            tool: predict.script.display().to_string(),
-            code: status.code().unwrap_or(-1),
-            stderr: "see output above".into(),
-        });
+    // ort `load-dynamic` resolves libonnxruntime via ORT_DYLIB_PATH on first
+    // use. Honor an externally-set value; otherwise point at the configured lib.
+    if std::env::var_os("ORT_DYLIB_PATH").is_none() {
+        std::env::set_var("ORT_DYLIB_PATH", &predict.ort_dylib);
     }
 
-    Ok(out_dir.join(&predict.out_file))
+    let input = preprocess::string_to_input(heavy, light);
+    info!(n = input.n, n_heavy = input.n_heavy, "Built model input");
+
+    let mut predictor = inference::Predictor::load(&predict.onnx)?;
+    let output = predictor.predict(&input)?;
+
+    let complex_pdb = out_dir.join(&predict.out_file);
+    pdb::write_complex(&output, &input, &complex_pdb)?;
+
+    Ok(complex_pdb)
 }
 
 fn run_visualize(

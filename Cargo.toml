@@ -14,14 +14,24 @@ path = "src/main.rs"
 clap = { version = "4.5", features = ["derive", "env"] }
 dotenvy = "0.15"
 thiserror = "2.0"
-# anyhow = "1.0"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 tracing = "0.1"
+# ONNX inference (replaces the Python ABodyBuilder3 worker).
+# default-features = false disables `download-binaries`, which statically links
+# pyke's prebuilt libonnxruntime.a — built against glibc >= 2.38 (uses
+# `__isoc23_sscanf`), so the binary won't load on debian-12 (glibc 2.36, the
+# Docker base) nor on the glibc-2.35 dev host. With `load-dynamic` we dlopen a
+# libonnxruntime.so at runtime instead (ORT_DYLIB_PATH); `api-24` pins ORT 1.24.
+ort = { version = "2.0.0-rc.12", default-features = false, features = ["load-dynamic", "api-24"] }
+ndarray = "0.16"
+# NB: pdbtbx 0.12's PDB *writer* left-justifies serial/resSeq, which FreeSASA's
+# strict column parser mis-reads (chain+resnum merge), so `pdb.rs` hand-writes
+# the openfold-compatible layout instead. Re-add pdbtbx if/when we need PDB
+# *parsing* (e.g. chain splitting).
 # Add when the pipeline lands:
 # serde = { version = "1.0", features = ["derive"] }
 # serde_json = "1.0"
 # csv = "1.3"
-# pdbtbx = "0.11"   # PDB parsing / chain splitting
 # polars = { version = "0.43", features = ["lazy", "csv"] }  # df join/filter (pandas equiv. for the SASA table)
 
 [profile.release]

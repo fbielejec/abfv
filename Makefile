@@ -46,13 +46,21 @@ watch: # Watch for changes and run clippy
 release: # Build release binary
 	cargo build --release
 
+.PHONY: ort
+ort: # Fetch the pinned onnxruntime shared lib into vendored/onnxruntime (not in git)
+	./vendored/fetch-onnxruntime.sh
+
+.PHONY: export-onnx
+export-onnx: # Re-export ABodyBuilder3 to vendored/abb3.onnx (verifies vs PyTorch)
+	$(VENV)/bin/python workers/export_onnx.py --checkpoint "$(CKPT)"
+
 .PHONY: predict
-predict: # Predict the Fv structure for the hardcoded example chains
+predict: # [reference] Predict via the Python ABodyBuilder3 worker (host venv)
 	$(VENV)/bin/python workers/predict.py "$(LIGHT)" "$(HEAVY)" --checkpoint "$(CKPT)"
 
 .PHONY: run
-run: # Run the abfv Rust CLI on the hardcoded example chains
-	cargo run -- --heavy "$(HEAVY)" --light "$(LIGHT)" predict --checkpoint "$(CKPT)" freesasa --binary "$(FREESASA)"
+run: ort # Run the abfv Rust CLI on the hardcoded example chains (ONNX inference)
+	cargo run -- --heavy "$(HEAVY)" --light "$(LIGHT)" predict freesasa --binary "$(FREESASA)"
 
 .PHONY: freesasa
 freesasa: # Run FreeSASA (rsa) on the three pipeline PDBs
